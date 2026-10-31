@@ -38,6 +38,11 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 zeroize = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# musl's own allocator is slow for a multi-threaded server; the static
+# release builds use mimalloc instead.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = "0.1.52"
+
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"

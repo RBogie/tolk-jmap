@@ -6,6 +6,16 @@ services:
     container_name: tolk
     restart: unless-stopped
     user: "1000:1000"
+    # Tolk needs no privileges: a read-only root filesystem (SQLite's
+    # temporary files go to the tmpfs), no Linux capabilities, and no way to
+    # gain any. Only the data volume is writable.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     # Pending Pings are answered at once on stop; this leaves room for
     # in-flight SendMail and Sync requests (see SHUTDOWN_DEADLINE_SECS).
     stop_grace_period: 30s

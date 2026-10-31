@@ -1,0 +1,265 @@
+name: Release
+
+# A release starts with a signed `vX.Y.Z` tag (only the maintainer can
+# create those, see the tag rulesets) and waits for approval in the
+# `release` environment before anything is built or published. Each platform
+# is compiled once: the static binary is a release download and the image
+# for that platform is built from the same build. The images are combined
+# into one multi-platform image on ghcr.io, and binaries and image get signed
+# build provenance (`gh attestation verify`). See docs/releasing.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/rbogie/tolk-jmap
+
+jobs:
+  # The tag must match Cargo.toml and have a dated CHANGELOG entry, so a
+  # mistake is caught before approval is asked.
+  verify:
+    name: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check tag, version and changelog
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::tag $TAG is not vX.Y.Z"; exit 1 ;;
+          esac
+          version="${TAG#v}"
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$cargo_version" != "$version" ]; then
+            echo "::error::tag $TAG does not match Cargo.toml version $cargo_version"
+            exit 1
+          fi
+          # The section heading must carry the release date: `## X.Y.Z (YYYY-MM-DD)`.
+          if ! grep -q -E "^## ${version//./\\.} \([0-9]{4}-[0-9]{2}-[0-9]{2}\)$" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md needs a '## $version (YYYY-MM-DD)' section"
+            exit 1
+          fi
+
+  # The maintainer's go-ahead; everything after this needs it.
+  approve:
+    name: approve
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: release
+    permissions: {}
+    steps:
+      - run: echo "Release approved"
+
+  build:
+    name: build (${{ matrix.platform }})
+    needs: approve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write # pushing the platform image by digest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { platform: linux/amd64, arch: amd64 }
+          - { platform: linux/arm64, arch: arm64 }
+          - { platform: linux/arm/v7, arch: armv7 }
+          - { platform: linux/386, arch: "386" }
+          - { platform: linux/ppc64le, arch: ppc64le }
+          - { platform: linux/riscv64, arch: riscv64 }
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      ARCH: ${{ matrix.arch }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # File and image timestamps from the commit, for reproducible builds.
+      - run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - run: docker buildx create --use --driver docker-container
+
+      - name: Binary
+        run: |
+          set -eu
+          docker buildx build \
+            --platform "$PLATFORM" \
+            --build-arg GIT_SHA="${GITHUB_SHA::7}" \
+            --target binary \
+            --output type=local,dest=out \
+            .
+          mkdir dist
+          mv out/tolk "dist/tolk-${TAG#v}-linux-$ARCH"
+
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+        run: echo "$TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      # The same build (cached from the step above), pushed by digest only;
+      # the publish job tags the combined image.
+      - name: Image
+        run: |
+          set -eu
+          docker buildx build \
+            --platform "$PLATFORM" \
+            --build-arg GIT_SHA="${GITHUB_SHA::7}" \
+            --provenance mode=max \
+            --sbom true \
+            --output "type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true,rewrite-timestamp=true" \
+            --metadata-file metadata.json \
+            .
+          mkdir digests
+          jq -r '."containerimage.digest"' metadata.json > "digests/$ARCH"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write # the GitHub release
+      packages: write # tags and attestations on ghcr.io
+      id-token: write # signing the attestations (Sigstore)
+      attestations: write # storing the attestations on GitHub
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+        run: echo "$TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      # Tagged X.Y.Z; a stable release also X.Y, and from 1.0 on X (before
+      # 1.0 a minor version may break, so there is no `0`). No `latest`.
+      - name: Multi-platform image
+        id: image
+        run: |
+          set -eu
+          version="${TAG#v}"
+          tags=(--tag "$IMAGE:$version")
+          case "$version" in
+            *-*) ;;
+            *)
+              tags+=(--tag "$IMAGE:${version%.*}")
+              major="${version%%.*}"
+              if [ "$major" -ge 1 ]; then
+                tags+=(--tag "$IMAGE:$major")
+              fi
+              ;;
+          esac
+          sources=()
+          for file in digests/*; do
+            sources+=("$IMAGE@$(cat "$file")")
+          done
+          docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+          digest=$(docker buildx imagetools inspect "$IMAGE:$version" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Release notes
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -eu
+          version="${TAG#v}"
+          # The CHANGELOG section for this version, without its heading
+          # (`## X.Y.Z (YYYY-MM-DD)`, checked by the verify job).
+          awk -v heading="## $version (" '
+            !found && index($0, heading) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          {
+            echo
+            echo "## Image"
+            echo
+            echo '```'
+            echo "$IMAGE:$version"
+            echo "$IMAGE@$DIGEST"
+            echo '```'
+            echo
+            echo "## Verifying"
+            echo
+            echo 'Binaries and image carry signed build provenance from this repository:'
+            echo
+            echo '```'
+            echo "gh attestation verify tolk-$version-linux-amd64 --repo $GITHUB_REPOSITORY"
+            echo "gh attestation verify oci://$IMAGE:$version --repo $GITHUB_REPOSITORY"
+            echo '```'
+          } >> notes.md
+          (cd dist && sha256sum -- * > SHA256SUMS)
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          version="${TAG#v}"
+          prerelease=()
+          case "$version" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Tolk $version" \
+            --notes-file notes.md \
+            --verify-tag \
+            "${prerelease[@]}"

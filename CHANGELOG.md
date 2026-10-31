@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## Unreleased
+- 
+
+## 0.1.0 (2026-10-31)
 
 First release. Developed against Stalwart 1.0 with Gmail on Android;
 also tried against Cyrus.
@@ -30,6 +33,13 @@ also tried against Cyrus.
   JMAP session, as folders named "<name> (<owner>)". Read-only shares
   refuse changes; servers that push no changes for shared accounts are
   polled (`SHARED_POLL_SECS`).
+
+### Distribution
+
+- A fully static binary for linux/amd64, arm64, arm/v7, 386, ppc64le and
+  riscv64, and a multi-platform image on ghcr.io that contains only that
+  binary and CA certificates. Both carry signed build provenance; the image
+  also has an SBOM.
 
 ### Operations
 

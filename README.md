@@ -52,18 +52,35 @@ Caddy, nginx). The proxy sends `/Microsoft-Server-ActiveSync` and
 `/autodiscover/` to it; everything else stays with the JMAP server.
 
 ```sh
-docker build -t tolk .
 docker run -d --name tolk \
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
   -e JMAP_URL=https://mail.example.com \
   -e TRUSTED_PROXIES=172.16.0.0/12 \
   -e PUBLIC_URL='https://mail.{domain}' \
   -v ./data:/data -e STATE_DB=/data/state.sqlite \
-  tolk
+  ghcr.io/rbogie/tolk-jmap:0.1
 ```
 
-The image builds for linux/amd64, arm64, arm/v7, 386, ppc64le, riscv64 and
-s390x (`docker buildx build --platform ...`), cross-compiled without
-emulation.
+Tolk is a single, fully static binary, and the image contains nothing else
+(no distribution, no shell): just the binary and the CA certificates. It
+runs as an unprivileged user and needs no capabilities and no writable
+filesystem apart from its data volume and `/tmp`, hence the flags above.
+Images are published for linux/amd64, arm64, arm/v7, 386, ppc64le and
+riscv64; each [release](https://github.com/RBogie/tolk-jmap/releases) also
+has the binaries, which run on any Linux without Docker. Pin a version, or
+better its digest (in the release notes); there is no `latest` tag.
+
+Releases carry signed build provenance, so you can check that a binary or
+image was built by this repository's release workflow from the tagged
+source before running it:
+
+```sh
+gh attestation verify oci://ghcr.io/rbogie/tolk-jmap:0.1.0 --repo RBogie/tolk-jmap
+gh attestation verify tolk-0.1.0-linux-amd64 --repo RBogie/tolk-jmap
+```
+
+To build it yourself: `docker build -t tolk .`, or
+`docker buildx build --target binary --output dist .` for just the binary.
 
 [deploy/compose.example.yaml](deploy/compose.example.yaml) has a compose
 service with Traefik labels. Every setting is described in
@@ -79,6 +96,7 @@ otherwise enter the server name, e.g. `mail.example.com`.
 
 [docs/operations.md](docs/operations.md) covers upgrades, backups,
 devices, traffic capture and troubleshooting.
+[docs/releasing.md](docs/releasing.md) describes how releases are made.
 
 ## Development
 
