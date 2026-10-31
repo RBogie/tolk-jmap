@@ -6,8 +6,9 @@ Tolk speaks Exchange ActiveSync 14.0, 14.1, 16.0 and 16.1 (configurable with `EA
 
 | Server | Status |
 |---|---|
-| Stalwart 1.0 | Tested continuously with Gmail on Android, and in a fresh local install (Docker): sessions with relative URLs, OAuth tokens from its code flow. Earlier versions are not tested. |
-| Cyrus IMAP | Tested locally with the Cyrus test image (`cyrus-docker-test-server`): FolderSync, folder create/rename/delete, Sync and creating events work. That image serves one request at a time, so push (EventSource) blocks it, and it delivers no mail, so Ping and invitations could not be tested there. Cyrus offers no JMAP tasks or notes either. |
+| Stalwart 1.0 | Tested continuously with Gmail on Android, and in CI with every scenario (mail, push, folders, calendar, meeting responses). OAuth tokens from its code flow were tested by hand. |
+| Stalwart 0.16 | Tested in CI with every scenario, on the last 0.16 release. |
+| Cyrus IMAP | Tested in CI with the Cyrus test image (`cyrus-docker-test-server`): FolderSync, folder create/rename/delete, Sync and creating events. That image serves one request at a time, so push (EventSource) blocks it, and it delivers no mail, so Ping and invitations are not tested there. Cyrus offers no JMAP tasks or notes either. |
 | Fastmail | Not tested: there is no self-hosted Fastmail, and a test account is needed. |
 
 ## Clients

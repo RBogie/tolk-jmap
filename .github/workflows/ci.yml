@@ -104,3 +104,100 @@ jobs:
         env:
           RESULT: ${{ needs.image-build.result }}
         run: test "$RESULT" = success
+
+  # The scenarios (scenarios/) against real JMAP servers, each pinned in
+  # scripts/ci/servers/<server>/Dockerfile. Cyrus's test server delivers no
+  # mail and serves one request at a time, so it runs the scenarios that need
+  # neither delivery nor push.
+  integration-server:
+    name: integration (${{ matrix.server }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: stalwart-1.0
+            setup: stalwart
+            jmap: http://127.0.0.1:18080
+            user1: user1@example.test
+            user2: user2@example.test
+            scenarios: scenarios/*.scn
+          - server: stalwart-0.16
+            setup: stalwart
+            jmap: http://127.0.0.1:18080
+            user1: user1@example.test
+            user2: user2@example.test
+            scenarios: scenarios/*.scn
+          - server: cyrus
+            setup: cyrus
+            jmap: http://localhost:8080
+            user1: user1
+            user2: user2
+            scenarios: scenarios/folders.scn scenarios/calendar.scn
+    env:
+      SERVER: ${{ matrix.server }}
+      SETUP: ${{ matrix.setup }}
+      JMAP_URL: ${{ matrix.jmap }}
+      EAS_USER1: ${{ matrix.user1 }}
+      EAS_USER2: ${{ matrix.user2 }}
+      SCENARIOS: ${{ matrix.scenarios }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - run: rustup toolchain install
+      - run: cargo build --locked --bin tolk --bin eas-client
+
+      - name: Start the server
+        run: |
+          set -eu
+          head -c 24 /dev/urandom | base64 | tr -d '/+=' > "$RUNNER_TEMP/password"
+          IMAGE=$(sed -n 's/^FROM //p' "scripts/ci/servers/$SERVER/Dockerfile")
+          PASSWORD=$(cat "$RUNNER_TEMP/password")
+          export IMAGE PASSWORD PORT=18080
+          "scripts/ci/$SETUP.sh"
+
+      - name: Start Tolk
+        run: |
+          JMAP_URL="$JMAP_URL" LISTEN_ADDR=127.0.0.1:18090 \
+            STATE_DB="$RUNNER_TEMP/state.sqlite" RUST_LOG=info,tolk=debug \
+            nohup ./target/debug/tolk > "$RUNNER_TEMP/tolk.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:18090/readyz && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/tolk.log"
+          exit 1
+
+      - name: Scenarios
+        env:
+          EAS_URL: http://127.0.0.1:18090
+        run: |
+          # SCENARIOS is a list of files and patterns.
+          # shellcheck disable=SC2086
+          EAS_PASSWORD_FILE1="$RUNNER_TEMP/password" EAS_PASSWORD_FILE2="$RUNNER_TEMP/password" \
+            ./scripts/run-scenarios.sh $SCENARIOS
+
+      - name: Logs
+        if: failure()
+        run: |
+          cat "$RUNNER_TEMP/tolk.log" || true
+          docker logs "tolk-ci-$SETUP" || true
+
+  # One check for the ruleset to require, whatever the server list is.
+  integration:
+    name: integration
+    needs: integration-server
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: All servers passed
+        env:
+          RESULT: ${{ needs.integration-server.result }}
+        run: test "$RESULT" = success

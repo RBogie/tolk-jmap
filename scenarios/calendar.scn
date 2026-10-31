@@ -1,0 +1,14 @@
+# An event created on the device is stored in the calendar and comes back
+# in a fresh sync. Needs no mail delivery or push, so it runs on every server.
+# Run with scripts/run-scenarios.sh (see there for the environment).
+
+provision | expect Status=1
+foldersync 0 | expect Status=1 | folder 8 calendar
+sync $calendar 0 | expect Status=1 | save SyncKey key
+sync $calendar $key 512 | expect Status=1 | save SyncKey key
+
+add-event $calendar $key "Calendar scenario $run" 20261205T100000Z 30 | expect Status=1
+
+# Start over, so the event has to come from the server.
+sync $calendar 0 | expect Status=1 | save SyncKey fresh
+sync $calendar $fresh 512 | expect "Subject=Calendar scenario $run"

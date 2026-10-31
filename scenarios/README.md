@@ -19,6 +19,16 @@ folders and events. Without arguments every `.scn` file runs.
 | `mail-basics.scn` | Send to itself, push (Ping), mark read, reply, move to Trash. |
 | `folders.scn` | Create, rename and delete a folder. |
 | `meeting-response.scn` | Account 2 invites account 1, who accepts; the event shows as accepted. |
+| `calendar.scn` | An event created on the device is stored and comes back in a fresh sync. |
+
+## In CI
+
+The `integration` job runs them against Stalwart 1.x, Stalwart 0.16 and
+Cyrus, each a throwaway container pinned in `scripts/ci/servers/` (Dependabot
+keeps those current). `scripts/ci/stalwart.sh` and `scripts/ci/cyrus.sh`
+start the servers and create the test users; they work locally too. Cyrus's
+test server delivers no mail and serves one request at a time, so it runs
+only `folders.scn` and `calendar.scn`.
 
 ## Format
 
