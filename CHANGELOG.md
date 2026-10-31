@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- 
+
 ## 0.1.0 (2026-10-31)
 
 First release. Developed against Stalwart 1.0 with Gmail on Android;
