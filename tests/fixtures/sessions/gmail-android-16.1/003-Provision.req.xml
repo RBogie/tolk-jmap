@@ -1,0 +1,9 @@
+<Provision:Provision>
+  <Policies>
+    <Policy>
+      <PolicyType>MS-EAS-Provisioning-WBXML</PolicyType>
+      <PolicyKey>749013765</PolicyKey>
+      <Status>1</Status>
+    </Policy>
+  </Policies>
+</Provision:Provision>

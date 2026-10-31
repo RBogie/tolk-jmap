@@ -1,0 +1,39 @@
+# Example service definition for Tolk behind Traefik, as used in
+# production. Adjust addresses, hosts and networks to your setup.
+services:
+  tolk:
+    image: tolk:latest
+    container_name: tolk
+    restart: unless-stopped
+    user: "1000:1000"
+    # Pending Pings are answered at once on stop; this leaves room for
+    # in-flight SendMail and Sync requests (see SHUTDOWN_DEADLINE_SECS).
+    stop_grace_period: 30s
+    environment:
+      - JMAP_URL=https://mail.example.com
+      - STATE_DB=/data/state.sqlite
+      # The reverse proxy, as an address or CIDR range.
+      - TRUSTED_PROXIES=172.18.0.2
+      - RUST_LOG=info
+      - SHUTDOWN_DEADLINE_SECS=25
+      # Autodiscover hands out https://mail.<domain of the address>.
+      - PUBLIC_URL=https://mail.{domain}
+      # Optional traffic capture (contains mail): users or user/device.
+      # - TRAFFIC_DIR=/data/traffic
+      # - TRAFFIC_CAPTURE=test@example.com
+    volumes:
+      - ./tolk/data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.activesync.entrypoints=https"
+      - "traefik.http.routers.activesync.priority=200"
+      - "traefik.http.routers.activesync.rule=Host(`mail.example.com`) && PathPrefix(`/Microsoft-Server-ActiveSync`)"
+      - "traefik.http.routers.activesync.tls=true"
+      - "traefik.http.routers.activesync.service=activesync"
+      - "traefik.http.services.activesync.loadbalancer.server.port=8080"
+      # Autodiscover, in any letter case, on the mail and autodiscover hosts.
+      - "traefik.http.routers.autodiscover.entrypoints=https"
+      - "traefik.http.routers.autodiscover.priority=200"
+      - "traefik.http.routers.autodiscover.rule=(Host(`mail.example.com`) || Host(`autodiscover.example.com`)) && PathRegexp(`(?i)^/autodiscover/`)"
+      - "traefik.http.routers.autodiscover.tls=true"
+      - "traefik.http.routers.autodiscover.service=activesync"

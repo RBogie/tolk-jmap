@@ -1,0 +1,12 @@
+# Folder operations on account 1: create, rename and delete a mail folder.
+# The deleted folder ends up in Trash, where the next FolderSync shows it.
+# Run with scripts/run-scenarios.sh (see there for the environment).
+
+provision | expect Status=1
+foldersync 0 | expect Status=1 | save SyncKey key
+folder-create $key 0 "Scenario $run" | expect Status=1 | save SyncKey key | save ServerId folder
+folder-update $key $folder 0 "Scenario $run renamed" | expect Status=1 | save SyncKey key
+folder-delete $key $folder | expect Status=1 | save SyncKey key
+foldersync $key | expect "DisplayName=Scenario $run renamed" | count Add=1 | save SyncKey key
+# Deleting it again from Trash removes it for good.
+folder-delete $key $folder | expect Status=1

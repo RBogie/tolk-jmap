@@ -1,0 +1,25 @@
+<Ping:Ping>
+  <HeartbeatInterval>780</HeartbeatInterval>
+  <Folders>
+    <Folder>
+      <Id>4</Id>
+      <Class>Email</Class>
+    </Folder>
+    <Folder>
+      <Id>2</Id>
+      <Class>Email</Class>
+    </Folder>
+    <Folder>
+      <Id>1</Id>
+      <Class>Email</Class>
+    </Folder>
+    <Folder>
+      <Id>6</Id>
+      <Class>Contacts</Class>
+    </Folder>
+    <Folder>
+      <Id>7</Id>
+      <Class>Calendar</Class>
+    </Folder>
+  </Folders>
+</Ping:Ping>

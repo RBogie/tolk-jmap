@@ -1,0 +1,7 @@
+{
+  "cmd": "Ping",
+  "params": [],
+  "sent_policy_key": false,
+  "protocol_version": "16.1",
+  "response_status": 200
+}

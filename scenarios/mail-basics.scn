@@ -1,0 +1,16 @@
+# Mail round trip on account 1, which only ever mails itself.
+# Run with scripts/run-scenarios.sh (see there for the environment).
+
+provision | expect Status=1
+foldersync 0 | expect Status=1 | folder 2 inbox | folder 4 trash
+sync $inbox 0 | expect Status=1 | save SyncKey key
+sync $inbox $key 512 | expect Status=1 | save SyncKey key
+
+sendmail $user1 "Scenario $run" "Sent by the mail-basics scenario"
+ping 60 $inbox | expect Status=2 | retry 90
+sync $inbox $key | save SyncKey key | within "Subject=Scenario $run" | item Subject msg | retry 60
+
+sync-read $inbox $key $msg 1 | expect Status=1 | save SyncKey key
+smartreply $inbox $msg $user1 "Reply from the mail-basics scenario"
+sync $inbox $key | save SyncKey key | expect "Subject~Re: eas-client" | retry 60
+move $msg $inbox $trash | expect Status=3

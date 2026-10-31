@@ -1,0 +1,17 @@
+<AirSync:Sync>
+  <Collections>
+    <Collection>
+      <SyncKey>2</SyncKey>
+      <CollectionId>2</CollectionId>
+      <GetChanges>0</GetChanges>
+      <Commands>
+        <Change>
+          <ServerId>2:22</ServerId>
+          <ApplicationData>
+            <Email:Read>1</Email:Read>
+          </ApplicationData>
+        </Change>
+      </Commands>
+    </Collection>
+  </Collections>
+</AirSync:Sync>

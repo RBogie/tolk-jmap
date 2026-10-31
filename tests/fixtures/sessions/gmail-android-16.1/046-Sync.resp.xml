@@ -1,0 +1,36 @@
+<AirSync:Sync>
+  <Collections>
+    <Collection>
+      <SyncKey>6</SyncKey>
+      <CollectionId>7</CollectionId>
+      <Status>1</Status>
+      <Commands>
+        <Add>
+          <ServerId>7:11</ServerId>
+          <ApplicationData>
+            <Calendar:TimeZone>AAAAAEUAdABjAC8AVQBUAEMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEUAdABjAC8AVQBUAEMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==</Calendar:TimeZone>
+            <Calendar:AllDayEvent>0</Calendar:AllDayEvent>
+            <Calendar:BusyStatus>2</Calendar:BusyStatus>
+            <Calendar:OrganizerEmail>redacted</Calendar:OrganizerEmail>
+            <Calendar:DtStamp>20261030T205839Z</Calendar:DtStamp>
+            <Calendar:EndTime>20261120T103000Z</Calendar:EndTime>
+            <Calendar:Sensitivity>0</Calendar:Sensitivity>
+            <Calendar:Subject>redacted</Calendar:Subject>
+            <Calendar:StartTime>20261120T100000Z</Calendar:StartTime>
+            <Calendar:UID>redacted</Calendar:UID>
+            <Calendar:MeetingStatus>3</Calendar:MeetingStatus>
+            <Calendar:Attendees>
+              <Attendee>
+                <Email>redacted</Email>
+                <Name>redacted</Name>
+                <AttendeeStatus>3</AttendeeStatus>
+                <AttendeeType>1</AttendeeType>
+              </Attendee>
+            </Calendar:Attendees>
+            <Calendar:ResponseType>3</Calendar:ResponseType>
+          </ApplicationData>
+        </Add>
+      </Commands>
+    </Collection>
+  </Collections>
+</AirSync:Sync>

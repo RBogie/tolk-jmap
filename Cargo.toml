@@ -1,0 +1,43 @@
+[package]
+name = "tolk-jmap"
+version = "0.1.0"
+edition = "2024"
+description = "Tolk: Exchange ActiveSync for JMAP mail servers"
+license = "AGPL-3.0-only"
+repository = "https://github.com/RBogie/tolk-jmap"
+readme = "README.md"
+keywords = ["jmap", "activesync", "eas", "email", "stalwart"]
+categories = ["email", "network-programming"]
+publish = false
+
+[lib]
+name = "tolk"
+
+[[bin]]
+name = "tolk"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+base64 = "0.23"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
+chrono-tz = "0.10.4"
+form_urlencoded = "1"
+mail-builder = "2.0.0"
+mail-parser = "1.0.0"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
+# reqwest's TLS, with the ring provider (see `http_client`).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+futures-util = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "fs", "sync", "time"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+zeroize = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"

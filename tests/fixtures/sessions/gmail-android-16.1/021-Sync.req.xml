@@ -1,0 +1,18 @@
+<AirSync:Sync>
+  <Collections>
+    <Collection>
+      <SyncKey>1</SyncKey>
+      <CollectionId>4</CollectionId>
+      <DeletesAsMoves>1</DeletesAsMoves>
+      <GetChanges/>
+      <WindowSize>50</WindowSize>
+      <Options>
+        <FilterType>3</FilterType>
+        <AirSyncBase:BodyPreference>
+          <Type>2</Type>
+          <TruncationSize>200000</TruncationSize>
+        </AirSyncBase:BodyPreference>
+      </Options>
+    </Collection>
+  </Collections>
+</AirSync:Sync>

@@ -1,0 +1,25 @@
+# Account 2 invites account 1, who accepts from the invitation mail.
+# The server side must then show the event as accepted (ResponseType 3) in
+# account 1's calendar; Gmail itself keeps showing "invited" (see
+# docs/compatibility.md).
+# Run with scripts/run-scenarios.sh (see there for the environment).
+
+# Account 1 has its inbox before the invitation goes out.
+provision | expect Status=1
+foldersync 0 | folder 2 inbox | folder 8 calendar
+sync $inbox 0 | save SyncKey key
+sync $inbox $key 512 | save SyncKey key
+
+login $user2 $password2
+provision | expect Status=1
+foldersync 0 | folder 8 organizer_calendar
+sync $organizer_calendar 0 | save SyncKey okey
+sync $organizer_calendar $okey 512 | save SyncKey okey
+add-event $organizer_calendar $okey "A10 scenario $run" 20261120T100000Z 30 $user1 | expect Status=1
+
+login $user1 $password1
+sync $inbox $key | save SyncKey key | within "Subject~A10 scenario $run" | item MeetingRequest invite | retry 120
+meeting-response $inbox $invite 1 | expect Status=1
+
+sync $calendar 0 | save SyncKey ckey
+sync $calendar $ckey 512 | within "Subject=A10 scenario $run" | expect ResponseType=3 | retry 60

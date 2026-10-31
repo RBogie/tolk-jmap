@@ -1,0 +1,61 @@
+<AirSync:Sync>
+  <Collections>
+    <Collection>
+      <SyncKey>3</SyncKey>
+      <CollectionId>1</CollectionId>
+      <Status>1</Status>
+      <Commands>
+        <Add>
+          <ServerId>1:14</ServerId>
+          <ApplicationData>
+            <Email:To>redacted</Email:To>
+            <Email:From>redacted</Email:From>
+            <Email:Subject>redacted</Email:Subject>
+            <Email:DateReceived>2026-10-30T20:58:42.000Z</Email:DateReceived>
+            <Email:DisplayTo>redacted</Email:DisplayTo>
+            <Email:ThreadTopic>redacted</Email:ThreadTopic>
+            <Email:Importance>1</Email:Importance>
+            <Email:Read>1</Email:Read>
+            <AirSyncBase:Body>
+              <Type>2</Type>
+              <EstimatedDataSize>37</EstimatedDataSize>
+              <Data>redacted</Data>
+            </AirSyncBase:Body>
+            <Email:MessageClass>IPM.Note</Email:MessageClass>
+            <Email:InternetCPID>65001</Email:InternetCPID>
+            <Email:Flag/>
+            <Email:ContentClass>urn:content-classes:message</Email:ContentClass>
+            <AirSyncBase:NativeBodyType>1</AirSyncBase:NativeBodyType>
+            <Email2:ConversationId>[opaque 8 bytes: 7265646163746564]</Email2:ConversationId>
+            <Email2:ConversationIndex>[opaque 8 bytes: 7265646163746564]</Email2:ConversationIndex>
+          </ApplicationData>
+        </Add>
+        <Add>
+          <ServerId>1:15</ServerId>
+          <ApplicationData>
+            <Email:To>redacted</Email:To>
+            <Email:From>redacted</Email:From>
+            <Email:Subject>redacted</Email:Subject>
+            <Email:DateReceived>2026-10-30T20:58:42.000Z</Email:DateReceived>
+            <Email:DisplayTo>redacted</Email:DisplayTo>
+            <Email:ThreadTopic>redacted</Email:ThreadTopic>
+            <Email:Importance>1</Email:Importance>
+            <Email:Read>1</Email:Read>
+            <AirSyncBase:Body>
+              <Type>2</Type>
+              <EstimatedDataSize>157</EstimatedDataSize>
+              <Data>redacted</Data>
+            </AirSyncBase:Body>
+            <Email:MessageClass>IPM.Note</Email:MessageClass>
+            <Email:InternetCPID>65001</Email:InternetCPID>
+            <Email:Flag/>
+            <Email:ContentClass>urn:content-classes:message</Email:ContentClass>
+            <AirSyncBase:NativeBodyType>1</AirSyncBase:NativeBodyType>
+            <Email2:ConversationId>[opaque 8 bytes: 7265646163746564]</Email2:ConversationId>
+            <Email2:ConversationIndex>[opaque 8 bytes: 7265646163746564]</Email2:ConversationIndex>
+          </ApplicationData>
+        </Add>
+      </Commands>
+    </Collection>
+  </Collections>
+</AirSync:Sync>

@@ -1,0 +1,15 @@
+<Provision:Provision>
+  <Settings:DeviceInformation>
+    <Set>
+      <Model>redacted</Model>
+      <FriendlyName>redacted</FriendlyName>
+      <OS>redacted</OS>
+      <UserAgent>redacted</UserAgent>
+    </Set>
+  </Settings:DeviceInformation>
+  <Policies>
+    <Policy>
+      <PolicyType>MS-EAS-Provisioning-WBXML</PolicyType>
+    </Policy>
+  </Policies>
+</Provision:Provision>

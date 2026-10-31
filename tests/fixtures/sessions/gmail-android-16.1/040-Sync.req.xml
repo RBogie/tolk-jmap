@@ -1,0 +1,24 @@
+<AirSync:Sync>
+  <Collections>
+    <Collection>
+      <SyncKey>4</SyncKey>
+      <CollectionId>7</CollectionId>
+      <DeletesAsMoves/>
+      <GetChanges/>
+      <WindowSize>10</WindowSize>
+      <Options>
+        <FilterType>4</FilterType>
+        <AirSyncBase:BodyPreference>
+          <Type>1</Type>
+          <TruncationSize>200000</TruncationSize>
+        </AirSyncBase:BodyPreference>
+      </Options>
+      <Commands>
+        <Delete>
+          <ServerId>7:10</ServerId>
+          <AirSyncBase:InstanceId>redacted</AirSyncBase:InstanceId>
+        </Delete>
+      </Commands>
+    </Collection>
+  </Collections>
+</AirSync:Sync>
