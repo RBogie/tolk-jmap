@@ -2759,3 +2759,440 @@ async fn shared_accounts_may_offer_only_some_kinds() {
         folders.by_name
     );
 }
+
+fn estimate_request(collection: &str, key: &str) -> Element {
+    use tolk::wbxml::cp::item_estimate as ie;
+    Element::new(ie::GetItemEstimate).child(
+        Element::new(ie::Collections).child(
+            Element::new(ie::Collection)
+                .child(text(airsync::SyncKey, key))
+                .child(text(ie::CollectionId, collection)),
+        ),
+    )
+}
+
+/// (Status, Estimate) of each collection in a GetItemEstimate reply.
+fn estimates(reply: &support::Reply) -> Vec<(String, Option<String>)> {
+    use tolk::wbxml::cp::item_estimate as ie;
+    reply
+        .root()
+        .find_all(ie::Response)
+        .map(|r| {
+            (
+                r.child_text(ie::Status).unwrap_or_default().to_owned(),
+                r.find(ie::Collection)
+                    .and_then(|c| c.child_text(ie::Estimate))
+                    .map(str::to_owned),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn item_estimate_counts_pending_changes() {
+    let h = Harness::start().await;
+    let ids: Vec<String> = (0..3)
+        .map(|i| h.jmap.add_email("inbox", &format!("Message {i}"), "Hello"))
+        .collect();
+    let (device, folders) = h.ready_device("d1").await;
+    let inbox = folders.id("Inbox");
+
+    // Before priming, and with an unknown folder.
+    let reply = device
+        .send("GetItemEstimate", Some(estimate_request(&inbox, "0")))
+        .await;
+    assert_eq!(estimates(&reply), [("3".to_owned(), None)], "not primed");
+    let reply = device
+        .send("GetItemEstimate", Some(estimate_request("999", "1")))
+        .await;
+    assert_eq!(
+        estimates(&reply),
+        [("2".to_owned(), None)],
+        "unknown folder"
+    );
+
+    let primed = device.sync(&inbox, "0", None).await;
+    let reply = device
+        .send(
+            "GetItemEstimate",
+            Some(estimate_request(&inbox, &primed.key)),
+        )
+        .await;
+    assert_eq!(estimates(&reply), [("1".to_owned(), Some("3".to_owned()))]);
+
+    // After a full sync: one new message and one deleted.
+    let synced = device.sync(&inbox, &primed.key, None).await;
+    h.jmap.add_email("inbox", "Message 3", "New");
+    h.jmap.change(|m| m.remove("Email", &ids[0]));
+    let reply = device
+        .send(
+            "GetItemEstimate",
+            Some(estimate_request(&inbox, &synced.key)),
+        )
+        .await;
+    assert_eq!(estimates(&reply), [("1".to_owned(), Some("2".to_owned()))]);
+
+    // The estimate changes nothing: the Sync still delivers both.
+    let next = device.sync(&inbox, &synced.key, None).await;
+    assert_eq!((next.adds.len(), next.deletes.len()), (1, 1));
+
+    let reply = device
+        .send("GetItemEstimate", Some(estimate_request(&inbox, "77")))
+        .await;
+    assert_eq!(estimates(&reply), [("4".to_owned(), None)], "unknown key");
+}
+
+fn meeting_response(collection: &str, request_id: &str, answer: &str) -> Element {
+    use tolk::wbxml::cp::meeting_response as mr;
+    Element::new(mr::MeetingResponse).child(
+        Element::new(mr::Request)
+            .child(text(mr::UserResponse, answer))
+            .child(text(mr::CollectionId, collection))
+            .child(text(mr::RequestId, request_id)),
+    )
+}
+
+/// (Status, CalendarId) of the first result of a MeetingResponse reply.
+fn meeting_result(reply: &support::Reply) -> (String, Option<String>) {
+    use tolk::wbxml::cp::meeting_response as mr;
+    let result = reply.root().find(mr::Result).expect("Result");
+    (
+        result.child_text(mr::Status).unwrap_or_default().to_owned(),
+        result.child_text(mr::CalendarId).map(str::to_owned),
+    )
+}
+
+fn invitation(uid: &str, status: &str) -> serde_json::Value {
+    json!({
+        "@type": "Event", "uid": uid, "title": "Planning",
+        "start": "2026-11-12T10:00:00", "timeZone": "Europe/Amsterdam", "duration": "PT1H",
+        "organizerCalendarAddress": "mailto:boss@example.org",
+        "participants": {
+            "o": { "@type": "Participant", "calendarAddress": "mailto:boss@example.org",
+                   "roles": { "owner": true } },
+            "me": { "@type": "Participant",
+                    "calendarAddress": format!("mailto:{}", support::fake_jmap::USER),
+                    "roles": { "attendee": true }, "participationStatus": status },
+        },
+    })
+}
+
+#[tokio::test]
+async fn meeting_responses_from_the_calendar_set_the_own_status() {
+    let h = Harness::start().await;
+    let event = h.jmap.change(|m| {
+        let mut event = invitation("plan@example.org", "needs-action");
+        event["calendarIds"] = json!({ "cal1": true });
+        m.insert("CalendarEvent", event)
+    });
+    let (device, folders) = h.ready_device("d1").await;
+    let calendar = folders.id("Calendar");
+    let initial = device.initial_sync(&calendar).await;
+    let server_id = initial.add_ids()[0].clone();
+    let status = |h: &Harness| {
+        h.jmap.read(|m| {
+            m.get("CalendarEvent", &event).unwrap()["participants"]["me"]["participationStatus"]
+                .clone()
+        })
+    };
+
+    let reply = device
+        .send(
+            "MeetingResponse",
+            Some(meeting_response(&calendar, &server_id, "2")),
+        )
+        .await;
+    assert_eq!(
+        meeting_result(&reply),
+        ("1".to_owned(), Some(server_id.clone()))
+    );
+    assert_eq!(status(&h), "tentative");
+
+    // Declining answers without a calendar item.
+    let reply = device
+        .send(
+            "MeetingResponse",
+            Some(meeting_response(&calendar, &server_id, "3")),
+        )
+        .await;
+    assert_eq!(meeting_result(&reply), ("1".to_owned(), None));
+    assert_eq!(status(&h), "declined");
+
+    // Unknown answers and items are invalid requests.
+    for (id, answer) in [(server_id.as_str(), "9"), ("999:1", "1")] {
+        let reply = device
+            .send(
+                "MeetingResponse",
+                Some(meeting_response(&calendar, id, answer)),
+            )
+            .await;
+        assert_eq!(meeting_result(&reply).0, "2", "{id} {answer}");
+    }
+}
+
+#[tokio::test]
+async fn meeting_responses_to_an_invitation_email_place_the_event() {
+    let h = Harness::start().await;
+    let email = h.jmap.add_email("inbox", "Invitation: Planning", "Join us");
+    h.jmap.change(|m| {
+        m.patch(
+            "Email",
+            &email,
+            json!({ "attachments": [{
+                "partId": "2", "blobId": "blob-ics", "size": 400, "name": "invite.ics",
+                "type": "text/calendar", "cid": null, "disposition": "attachment",
+            }] })
+            .as_object()
+            .unwrap(),
+        );
+        m.parsed.insert(
+            "blob-ics".to_owned(),
+            invitation("new@example.org", "needs-action"),
+        );
+    });
+    let (device, folders) = h.ready_device("d1").await;
+    let inbox = folders.id("Inbox");
+    let calendar = folders.id("Calendar");
+    let initial = device.initial_sync(&inbox).await;
+    let mail_id = initial.add_ids()[0].clone();
+
+    // The server has not put the invitation in a calendar: accepting adds it.
+    let reply = device
+        .send(
+            "MeetingResponse",
+            Some(meeting_response(&inbox, &mail_id, "1")),
+        )
+        .await;
+    let (status, calendar_id) = meeting_result(&reply);
+    assert_eq!(status, "1");
+    assert!(calendar_id.unwrap().starts_with(&format!("{calendar}:")));
+    let placed = h.jmap.read(|m| {
+        let events = m.all("CalendarEvent");
+        assert_eq!(events.len(), 1);
+        events[0].clone()
+    });
+    assert_eq!(placed["calendarIds"], json!({ "cal1": true }));
+    assert_eq!(
+        placed["participants"]["me"]["participationStatus"],
+        "accepted"
+    );
+
+    // Answering again finds the placed event by its UID.
+    let reply = device
+        .send(
+            "MeetingResponse",
+            Some(meeting_response(&inbox, &mail_id, "3")),
+        )
+        .await;
+    assert_eq!(meeting_result(&reply), ("1".to_owned(), None));
+    h.jmap.read(|m| {
+        let events = m.all("CalendarEvent");
+        assert_eq!(events.len(), 1, "not placed twice");
+        assert_eq!(
+            events[0]["participants"]["me"]["participationStatus"],
+            "declined"
+        );
+    });
+
+    // A mail without an invitation is an invalid request.
+    h.jmap.add_email("inbox", "Lunch?", "No invitation");
+    let plain_id = device.sync(&inbox, &initial.key, None).await.add_ids()[0].clone();
+    let reply = device
+        .send(
+            "MeetingResponse",
+            Some(meeting_response(&inbox, &plain_id, "1")),
+        )
+        .await;
+    assert_eq!(meeting_result(&reply).0, "2");
+}
+
+fn smart(
+    root: tolk::wbxml::Tag,
+    client_id: &str,
+    source: Option<(&str, &str)>,
+    mime: &str,
+) -> Element {
+    let mut request = Element::new(root).child(text(cm::ClientId, client_id));
+    if let Some((folder, item)) = source {
+        request.push(
+            Element::new(cm::Source)
+                .child(text(cm::FolderId, folder))
+                .child(text(cm::ItemId, item)),
+        );
+    }
+    request
+        .child(Element::new(cm::SaveInSentItems))
+        .child(Element::with_opaque(cm::Mime, mime.as_bytes()))
+}
+
+/// The status of a failed compose command; `None` for success.
+fn compose_status(reply: &support::Reply) -> Option<String> {
+    assert!(reply.status.is_success());
+    reply.body.as_ref().map(|_| {
+        reply
+            .root()
+            .child_text(cm::Status)
+            .unwrap_or_default()
+            .to_owned()
+    })
+}
+
+/// The raw message of the only email in Sent.
+fn sent_message(h: &Harness) -> Vec<u8> {
+    h.jmap.read(|m| {
+        let sent: Vec<_> = m
+            .all("Email")
+            .into_iter()
+            .filter(|e| e["mailboxIds"]["sent"] == true)
+            .collect();
+        assert_eq!(sent.len(), 1, "one message in Sent");
+        m.blobs[sent[0]["blobId"].as_str().unwrap()].0.clone()
+    })
+}
+
+#[tokio::test]
+async fn smart_reply_quotes_the_original_and_marks_it_answered() {
+    let h = Harness::start().await;
+    let original = h
+        .jmap
+        .add_email("inbox", "Plans", "Shall we meet on Friday?");
+    let (device, folders) = h.ready_device("d1").await;
+    let inbox = folders.id("Inbox");
+    let item = device.initial_sync(&inbox).await.add_ids()[0].clone();
+    let mime = "From: test@example.com\r\nTo: sender@example.org\r\nSubject: Re: Plans\r\n\r\nFriday works.\r\n";
+
+    let reply = device
+        .send(
+            "SmartReply",
+            Some(smart(cm::SmartReply, "r-1", Some((&inbox, &item)), mime)),
+        )
+        .await;
+    assert_eq!(compose_status(&reply), None);
+
+    let raw = sent_message(&h);
+    let sent = mail_parser::MessageParser::default().parse(&raw).unwrap();
+    let body = sent.body_text(0).unwrap();
+    assert!(body.starts_with("Friday works."), "{body}");
+    assert!(body.contains("> Shall we meet on Friday?"), "{body}");
+    let original_id = h.jmap.read(|m| {
+        let email = m.get("Email", &original).unwrap();
+        assert_eq!(email["keywords"]["$answered"], true);
+        email["messageId"][0].as_str().unwrap().to_owned()
+    });
+    let headers = String::from_utf8_lossy(&raw);
+    assert!(
+        headers.contains(&format!("In-Reply-To: <{original_id}>")),
+        "{headers}"
+    );
+    h.jmap.read(|m| {
+        assert_eq!(
+            m.submissions[0]["envelope"]["rcptTo"],
+            json!([{ "email": "sender@example.org" }])
+        );
+    });
+
+    // A reply to a message that does not exist is not sent.
+    let reply = device
+        .send(
+            "SmartReply",
+            Some(smart(cm::SmartReply, "r-2", Some((&inbox, "999")), mime)),
+        )
+        .await;
+    assert_eq!(compose_status(&reply).as_deref(), Some("150"));
+    h.jmap.read(|m| assert_eq!(m.submissions.len(), 1));
+}
+
+#[tokio::test]
+async fn smart_forward_adds_the_original_attachments() {
+    let h = Harness::start().await;
+    let original = h.jmap.add_email("inbox", "Report", "See the attachment.");
+    h.jmap.change(|m| {
+        m.blobs.insert(
+            "blob-report".to_owned(),
+            (b"%PDF-1.7 report".to_vec(), "application/pdf".to_owned()),
+        );
+        m.patch(
+            "Email",
+            &original,
+            json!({ "attachments": [{
+                "partId": "2", "blobId": "blob-report", "size": 15, "name": "report.pdf",
+                "type": "application/pdf", "cid": null, "disposition": "attachment",
+            }] })
+            .as_object()
+            .unwrap(),
+        );
+    });
+    let (device, folders) = h.ready_device("d1").await;
+    let inbox = folders.id("Inbox");
+    let item = device.initial_sync(&inbox).await.add_ids()[0].clone();
+    let mime = "From: test@example.com\r\nTo: colleague@example.org\r\nSubject: Fwd: Report\r\n\r\nFor you.\r\n";
+
+    let reply = device
+        .send(
+            "SmartForward",
+            Some(smart(cm::SmartForward, "f-1", Some((&inbox, &item)), mime)),
+        )
+        .await;
+    assert_eq!(compose_status(&reply), None);
+
+    let raw = sent_message(&h);
+    let sent = mail_parser::MessageParser::default().parse(&raw).unwrap();
+    let body = sent.body_text(0).unwrap();
+    assert!(
+        body.contains("---------- Forwarded message ---------"),
+        "{body}"
+    );
+    assert!(body.contains("See the attachment."), "{body}");
+    let attachment = sent
+        .attachments()
+        .next()
+        .expect("the original's attachment");
+    assert_eq!(attachment.attachment_name(), Some("report.pdf"));
+    assert_eq!(&*attachment.decoded(), b"%PDF-1.7 report");
+    h.jmap.read(|m| {
+        assert_eq!(
+            m.get("Email", &original).unwrap()["keywords"]["$forwarded"],
+            true
+        );
+    });
+}
+
+#[tokio::test]
+async fn compose_rejects_unusable_messages() {
+    let h = Harness::start().await;
+    let (device, _) = h.ready_device("d1").await;
+    let cases = [
+        (
+            "no recipient",
+            "From: test@example.com\r\nSubject: Hi\r\n\r\nHello\r\n",
+            "119",
+        ),
+        ("no MIME", "", "107"),
+    ];
+    for (name, mime, expected) in cases {
+        let mut request = Element::new(cm::SendMail).child(text(cm::ClientId, name));
+        if !mime.is_empty() {
+            request.push(Element::with_opaque(cm::Mime, mime.as_bytes()));
+        }
+        let reply = device.send("SendMail", Some(request)).await;
+        assert_eq!(compose_status(&reply).as_deref(), Some(expected), "{name}");
+    }
+
+    // A failed message can be sent again with the same ClientId.
+    let mime = "From: test@example.com\r\nTo: friend@example.org\r\nSubject: Hi\r\n\r\nHello\r\n";
+    let reply = device
+        .send(
+            "SendMail",
+            Some(smart(cm::SendMail, "no recipient", None, mime)),
+        )
+        .await;
+    assert_eq!(compose_status(&reply), None);
+
+    // A failed submission is reported.
+    h.jmap
+        .fail_method("EmailSubmission/set", "forbiddenFrom", 1);
+    let reply = device
+        .send("SendMail", Some(smart(cm::SendMail, "c-2", None, mime)))
+        .await;
+    assert_eq!(compose_status(&reply).as_deref(), Some("120"));
+}

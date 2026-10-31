@@ -70,6 +70,9 @@ pub struct Model {
     /// (`accountNotSupportedByMethod`, as Stalwart answers for a shared
     /// account without shared address books).
     pub unsupported: Vec<String>,
+    /// What `CalendarEvent/parse` returns per blob id; other blobs are not
+    /// parsable.
+    pub parsed: HashMap<String, Value>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -630,11 +633,23 @@ fn dispatch(
         ("Principal", _) => ("error".to_owned(), json!({ "type": "forbidden" })),
         ("Email", "import") => ok(email_import(model, &args, created_ids)),
         ("EmailSubmission", "set") => ok(submission_set(model, &args, created_ids)),
-        ("CalendarEvent", "parse") => ok(json!({
-            "accountId": ACCOUNT,
-            "parsed": {},
-            "notParsable": args["blobIds"].clone(),
-        })),
+        ("CalendarEvent", "parse") => {
+            let (parsed, not_parsable): (Vec<&Value>, Vec<&Value>) = args["blobIds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .partition(|id| model.parsed.contains_key(id.as_str().unwrap_or_default()));
+            let parsed: Map<String, Value> = parsed
+                .into_iter()
+                .filter_map(Value::as_str)
+                .map(|id| (id.to_owned(), json!([model.parsed[id]])))
+                .collect();
+            ok(json!({
+                "accountId": ACCOUNT,
+                "parsed": parsed,
+                "notParsable": not_parsable,
+            }))
+        }
         (t, "get") if TYPES.contains(&t) => ok(get_objects(model, t, &args)),
         (t, "query") if TYPES.contains(&t) => ok(query(model, t, &args)),
         (t, "changes") if TYPES.contains(&t) => match changes(model, t, &args) {
