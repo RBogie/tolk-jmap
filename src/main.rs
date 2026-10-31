@@ -7,6 +7,10 @@ use std::{net::SocketAddr, time::Duration};
 use tolk::config;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// `0.1.0 (abc1234)`: the crate version and, in images, the git commit.
 fn version() -> String {
     match option_env!("GIT_SHA") {

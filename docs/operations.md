@@ -29,6 +29,10 @@ JMAP server. A copy of the database is made daily (`BACKUP_DIR`,
 `BACKUP_KEEP`). Restoring an older copy is safe: devices that are ahead of
 it resync the affected folders (see configuration.md).
 
+The image has no shell or tools, only the `tolk` binary. Work on the data
+volume from the host, or with a throwaway container that mounts it, e.g.
+`docker run --rm -it -v ./tolk/data:/data debian:trixie-slim`.
+
 ## Devices
 
 ```sh
