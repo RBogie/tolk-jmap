@@ -54,6 +54,40 @@ jobs:
         with:
           arguments: --locked
 
+  # A short run of each fuzz target (fuzz/), so decoder regressions show up
+  # in the pull request. Without a sanitizer it works on the stable
+  # toolchain; Tolk has no unsafe code for one to check.
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [wbxml_decode, query_parse, timezone_blob]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - run: rustup toolchain install
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Fuzz
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo fuzz run --sanitizer none "$TARGET" -- -max_total_time=120
+
+      - name: Crashing input
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
   # The release image for each supported platform (see the Dockerfile's
   # header), built in parallel but not pushed.
   image-build:
