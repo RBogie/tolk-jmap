@@ -1,0 +1,63 @@
+name: Client test report
+description: Results of testing a mail app (or JMAP server) with Tolk, working or not.
+labels: ["client report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! The steps follow
+        [docs/testing-a-client.md](https://github.com/RBogie/tolk-jmap/blob/main/docs/testing-a-client.md).
+        Use test accounts, and remove private data from anything you paste.
+  - type: input
+    id: app
+    attributes:
+      label: Mail app
+      description: App, its version, and the phone's OS version
+      placeholder: "iOS Mail on iOS 26.1"
+    validations:
+      required: true
+  - type: input
+    id: eas
+    attributes:
+      label: EAS version
+      description: "The version the app chose, from `tolk devices list`"
+      placeholder: "16.1"
+  - type: input
+    id: tolk
+    attributes:
+      label: Tolk version
+      placeholder: "tolk 0.1.0 (abc1234)"
+    validations:
+      required: true
+  - type: input
+    id: server
+    attributes:
+      label: JMAP server
+      placeholder: "Stalwart 1.0.1"
+    validations:
+      required: true
+  - type: checkboxes
+    id: works
+    attributes:
+      label: What works
+      description: Tick each step that works as expected.
+      options:
+        - label: Adding the account with only address and password (Autodiscover)
+        - label: Initial mail sync
+        - label: Push (new mail arrives within seconds)
+        - label: Read, unread and flag
+        - label: Delete and move
+        - label: Send with an attachment
+        - label: Reply and forward
+        - label: Search (mail and recipients)
+        - label: Folders (create, rename, delete)
+        - label: Contacts both ways
+        - label: Calendar both ways, including recurring events
+        - label: Invitations and responses
+        - label: Out of office
+        - label: Drafts (EAS 16 apps)
+  - type: textarea
+    id: notes
+    attributes:
+      label: What did not work
+      description: For each step that failed, what happened. Logs or traffic help most.

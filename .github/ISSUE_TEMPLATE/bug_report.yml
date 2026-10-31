@@ -1,0 +1,63 @@
+name: Bug report
+description: Something does not work as it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Security problems go to a private report
+        instead (see SECURITY.md), not here.
+
+        Please remove private data (addresses, subjects, message content,
+        passwords) from anything you paste.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Add the account in ...
+        2. ...
+  - type: input
+    id: tolk
+    attributes:
+      label: Tolk version
+      description: "`tolk --version`, or the image tag"
+      placeholder: "tolk 0.1.0 (abc1234)"
+    validations:
+      required: true
+  - type: input
+    id: app
+    attributes:
+      label: Mail app
+      description: App, its version, and the phone's OS version
+      placeholder: "Gmail 2026.10.20 on Android 17"
+    validations:
+      required: true
+  - type: input
+    id: eas
+    attributes:
+      label: EAS version
+      description: "From `tolk devices list`"
+      placeholder: "16.1"
+  - type: input
+    id: server
+    attributes:
+      label: JMAP server
+      placeholder: "Stalwart 1.0.1"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >-
+        Tolk's log around the problem. `RUST_LOG=info,tolk=debug` adds detail;
+        debug logs can contain event and contact data, so check before pasting.
+      render: text
