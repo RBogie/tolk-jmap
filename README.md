@@ -61,6 +61,10 @@ docker run -d --name tolk \
   tolk
 ```
 
+The image builds for linux/amd64, arm64, arm/v7, 386, ppc64le, riscv64 and
+s390x (`docker buildx build --platform ...`), cross-compiled without
+emulation.
+
 [deploy/compose.example.yaml](deploy/compose.example.yaml) has a compose
 service with Traefik labels. Every setting is described in
 [docs/configuration.md](docs/configuration.md), together with what the
