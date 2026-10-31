@@ -32,6 +32,27 @@ updates:
     cooldown:
       default-days: 7
 
+  # The servers the integration tests run against (scripts/ci/servers).
+  - package-ecosystem: docker
+    directories:
+      - "/scripts/ci/servers/stalwart-1.0"
+      - "/scripts/ci/servers/cyrus"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  # The 0.16 line stays on 0.16: newer majors are tested by the entry above.
+  - package-ecosystem: docker
+    directory: "/scripts/ci/servers/stalwart-0.16"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "stalwartlabs/stalwart"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
