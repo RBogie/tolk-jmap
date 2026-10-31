@@ -1,7 +1,21 @@
 # Tolk
 
+[![CI](https://github.com/RBogie/tolk-jmap/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/RBogie/tolk-jmap/actions/workflows/ci.yml?query=branch%3Amain)
+[![Release](https://img.shields.io/github/v/release/RBogie/tolk-jmap?sort=semver)](https://github.com/RBogie/tolk-jmap/releases/latest)
+[![Container image](https://img.shields.io/badge/image-ghcr.io%2Frbogie%2Ftolk--jmap-blue?logo=docker&logoColor=white)](https://github.com/RBogie/tolk-jmap/pkgs/container/tolk-jmap)
+[![Build provenance](https://img.shields.io/badge/build%20provenance-attested-success?logo=github)](https://github.com/RBogie/tolk-jmap/attestations)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/RBogie/tolk-jmap/badge)](https://scorecard.dev/viewer/?uri=github.com/RBogie/tolk-jmap)
+[![License: AGPL-3.0](https://img.shields.io/github/license/RBogie/tolk-jmap)](LICENSE)
+
 *Tolk* is Dutch for interpreter: it lets phones that speak Exchange
 ActiveSync talk to a JMAP mail server.
+
+**[Releases](https://github.com/RBogie/tolk-jmap/releases)** ·
+**[Configuration](docs/configuration.md)** ·
+**[Compatibility](docs/compatibility.md)** ·
+**[Operations](docs/operations.md)** ·
+**[Contributing](CONTRIBUTING.md)** ·
+**[Security](SECURITY.md)**
 
 An Exchange ActiveSync (EAS) server in front of a JMAP mail server. Phones
 add an "Exchange" account and get mail, contacts and calendar with push,
