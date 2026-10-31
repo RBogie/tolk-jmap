@@ -4,7 +4,9 @@ A release is a signed tag on `main`. The [release workflow](../.github/workflows
 then builds, after approval, for every supported platform:
 
 - a static binary per platform (`tolk-<version>-linux-<arch>`) with
-  `SHA256SUMS`, attached to the GitHub release;
+  `SHA256SUMS` and the binaries' signed provenance
+  (`tolk-<version>.intoto.jsonl`, for offline verification), attached to the
+  GitHub release;
 - one multi-platform image, `ghcr.io/rbogie/tolk-jmap:<version>` and, for a
   stable release, `:<major>.<minor>` and from 1.0 on `:<major>`, which then
   follow every non-breaking update. Before 1.0 a minor version may break
