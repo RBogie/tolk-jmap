@@ -1,0 +1,44 @@
+# Weekly version updates; security updates come as soon as an advisory is
+# published (enabled in the repository settings). New releases wait a few
+# days before Dependabot proposes them, so a compromised or broken release
+# is usually pulled before it reaches a pull request.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - "/"
+      - "/fuzz"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      # Minor and patch updates in one pull request; major updates each get
+      # their own, since they can need code changes.
+      cargo:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: rust-toolchain
+    directory: "/"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns:
+          - "*"
