@@ -37,3 +37,71 @@ jobs:
       - run: cargo doc --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # Known vulnerabilities, licenses and crate sources (deny.toml).
+  deny:
+    name: deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          arguments: --locked
+
+  # The release image for each supported platform (see the Dockerfile's
+  # header), built in parallel but not pushed.
+  image-build:
+    name: image (${{ matrix.platform }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+          - linux/arm/v7
+          - linux/386
+          - linux/ppc64le
+          - linux/riscv64
+          - linux/s390x
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - run: docker buildx create --use --driver docker-container
+
+      - name: Build
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          docker buildx build \
+            --platform "$PLATFORM" \
+            --build-arg GIT_SHA="$GIT_SHA" \
+            --output type=cacheonly \
+            .
+
+  # One check for the ruleset to require, whatever the platform list is:
+  # it passes only when every platform built.
+  image:
+    name: image
+    needs: image-build
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: All platforms built
+        env:
+          RESULT: ${{ needs.image-build.result }}
+        run: test "$RESULT" = success
