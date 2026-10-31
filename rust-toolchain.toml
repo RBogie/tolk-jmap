@@ -1,0 +1,6 @@
+# The compiler for local builds and CI (the Docker image pins the same
+# version in its Dockerfile). Dependabot proposes updates.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
