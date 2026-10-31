@@ -1,7 +1,11 @@
 # Changelog
 
 ## Unreleased
-- 
+
+### Fixed
+
+- The WBXML decoder no longer accepts a global token in place of the root
+  element (found by fuzzing).
 
 ## 0.1.0 (2026-10-31)
 

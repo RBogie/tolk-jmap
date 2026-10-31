@@ -127,7 +127,8 @@ cargo clippy --all-targets
   integration tests drive the real router against.
 - `src/bin/eas-client.rs` is a scripted EAS client; `scenarios/` holds
   end-to-end scenarios for it ([scenarios/README.md](scenarios/README.md)).
-- `fuzz/` has cargo-fuzz targets (nightly).
+- `fuzz/` has cargo-fuzz targets (`cargo fuzz run --sanitizer none <target>`
+  works on the stable toolchain).
 
 [docs/ROADMAP.md](docs/ROADMAP.md) lists what is planned.
 

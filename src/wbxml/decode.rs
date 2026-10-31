@@ -104,6 +104,11 @@ impl<'a> Decoder<'a> {
         if byte & token::ATTRIBUTES != 0 {
             return Err(self.error_at(start, "attributes are not supported"));
         }
+        // Below FIRST_TAG are global tokens: the root could otherwise get
+        // one as its tag, which encodes as that global token.
+        if byte & token::TAG_MASK < token::FIRST_TAG {
+            return Err(self.error_at(start, format!("unsupported token 0x{byte:02X}")));
+        }
         let mut element = Element::new(Tag {
             page: self.page,
             token: byte & token::TAG_MASK,
@@ -340,6 +345,12 @@ mod tests {
     fn rejects_trailing_bytes_and_attributes() {
         assert!(decode(&doc(&[0x05, 0x05])).is_err());
         assert!(decode(&doc(&[0x85, 0x01])).is_err());
+    }
+
+    #[test]
+    fn rejects_a_global_token_as_the_root() {
+        let err = decode(&doc(&[0x40, 0x01])).unwrap_err();
+        assert!(err.message.contains("0x40"), "{err}");
     }
 
     #[test]
