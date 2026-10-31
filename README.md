@@ -5,6 +5,7 @@
 [![Container image](https://img.shields.io/badge/image-ghcr.io%2Frbogie%2Ftolk--jmap-blue?logo=docker&logoColor=white)](https://github.com/RBogie/tolk-jmap/pkgs/container/tolk-jmap)
 [![Build provenance](https://img.shields.io/badge/build%20provenance-attested-success?logo=github)](https://github.com/RBogie/tolk-jmap/attestations)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/RBogie/tolk-jmap/badge)](https://scorecard.dev/viewer/?uri=github.com/RBogie/tolk-jmap)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16127/badge)](https://www.bestpractices.dev/projects/16127)
 [![License: AGPL-3.0](https://img.shields.io/github/license/RBogie/tolk-jmap)](LICENSE)
 
 *Tolk* is Dutch for interpreter: it lets phones that speak Exchange

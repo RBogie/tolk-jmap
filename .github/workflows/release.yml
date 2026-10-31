@@ -205,6 +205,7 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest-binaries
         with:
           subject-path: dist/*
 
@@ -213,6 +214,13 @@ jobs:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
+
+      # The signed provenance of the binaries as a release file too: it allows
+      # verifying offline, and tools such as OpenSSF Scorecard look for it.
+      - name: Provenance file
+        env:
+          BUNDLE: ${{ steps.attest-binaries.outputs.bundle-path }}
+        run: cp "$BUNDLE" "dist/tolk-${TAG#v}.intoto.jsonl"
 
       - name: Release notes
         env:
@@ -243,6 +251,12 @@ jobs:
             echo '```'
             echo "gh attestation verify tolk-$version-linux-amd64 --repo $GITHUB_REPOSITORY"
             echo "gh attestation verify oci://$IMAGE:$version --repo $GITHUB_REPOSITORY"
+            echo '```'
+            echo
+            echo "Offline, with \`tolk-$version.intoto.jsonl\` from this release:"
+            echo
+            echo '```'
+            echo "gh attestation verify tolk-$version-linux-amd64 --repo $GITHUB_REPOSITORY --bundle tolk-$version.intoto.jsonl"
             echo '```'
           } >> notes.md
           (cd dist && sha256sum -- * > SHA256SUMS)
