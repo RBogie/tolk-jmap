@@ -47,7 +47,7 @@ pub(super) async fn mail_commands(
     // Emails that vanished between listing and fetching are simply skipped.
     for msg in &emails {
         snapshot.insert(msg.id.clone(), view::flags(&msg.keywords));
-        let data = email::application_data(msg, body, jmap).await?;
+        let data = email::application_data(msg, body, jmap, None).await?;
         commands.push(
             Element::new(airsync::Add)
                 .child(server_id(&msg.id))
@@ -357,7 +357,7 @@ impl ClientCommands<'_> {
             };
             out.push(
                 item_status(airsync::Fetch, server_id, status::OK)
-                    .child(email::application_data(msg, self.body, self.jmap).await?),
+                    .child(email::application_data(msg, self.body, self.jmap, None).await?),
             );
         }
         Ok(out)

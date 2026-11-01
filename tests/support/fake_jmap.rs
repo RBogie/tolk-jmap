@@ -73,6 +73,11 @@ pub struct Model {
     /// What `CalendarEvent/parse` returns per blob id; other blobs are not
     /// parsable.
     pub parsed: HashMap<String, Value>,
+    /// Downloads answer `Range` requests with the whole blob, as servers
+    /// without range support do.
+    pub ignore_ranges: bool,
+    /// Every `Range` header downloads received.
+    pub ranges: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -473,16 +478,43 @@ async fn download(
     if !authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let model = if account == SHARED_ACCOUNT {
+    let mut model = if account == SHARED_ACCOUNT {
         shared.other.lock().unwrap()
     } else {
         shared.model.lock().unwrap()
     };
-    match model.blobs.get(&blob) {
-        Some((data, mime)) => {
-            ([(header::CONTENT_TYPE, mime.clone())], data.clone()).into_response()
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    if let Some(range) = &range {
+        model.ranges.push(range.clone());
+    }
+    let Some((data, mime)) = model.blobs.get(&blob) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let wanted = range.filter(|_| !model.ignore_ranges).and_then(|r| {
+        let (start, end) = r.strip_prefix("bytes=")?.split_once('-')?;
+        Some((start.parse::<usize>().ok()?, end.parse::<usize>().ok()?))
+    });
+    match wanted {
+        Some((start, _)) if start >= data.len() => {
+            StatusCode::RANGE_NOT_SATISFIABLE.into_response()
         }
-        None => StatusCode::NOT_FOUND.into_response(),
+        Some((start, end)) => {
+            let end = end.min(data.len() - 1);
+            let content_range = format!("bytes {start}-{end}/{}", data.len());
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [
+                    (header::CONTENT_TYPE, mime.clone()),
+                    (header::CONTENT_RANGE, content_range),
+                ],
+                data[start..=end].to_vec(),
+            )
+                .into_response()
+        }
+        None => ([(header::CONTENT_TYPE, mime.clone())], data.clone()).into_response(),
     }
 }
 

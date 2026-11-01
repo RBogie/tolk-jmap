@@ -21,8 +21,10 @@
 //!   folder-update <key> <server-id> <parent> <name>
 //!   folder-delete <key> <server-id>
 //!   estimate <collection> <key>
-//!   fetch <collection> <server-id>    ItemOperations of one item
-//!   fetch-attachment <file-reference> ItemOperations of one attachment
+//!   fetch <collection> <server-id> [body-type]   ItemOperations of one item
+//!                                     (body type 1 plain, 2 HTML, 4 MIME)
+//!   fetch-attachment <file-reference> [start-end]  ItemOperations of one
+//!                                     attachment, or a range of it
 //!   move <server-id> <from-folder> <to-folder>
 //!   ping <heartbeat> <folder[:Class]>...
 //!   sendmail <to> <subject> [body]
@@ -171,20 +173,29 @@ async fn run(
             client.send("GetItemEstimate", Some(body)).await
         }
         "fetch" => {
-            let body = Element::new(io::ItemOperations).child(
-                Element::new(io::Fetch)
-                    .child(text(io::Store, "Mailbox"))
-                    .child(text(airsync::CollectionId, arg(0, "collection")?))
-                    .child(text(airsync::ServerId, arg(1, "server-id")?)),
-            );
+            let mut fetch = Element::new(io::Fetch)
+                .child(text(io::Store, "Mailbox"))
+                .child(text(airsync::CollectionId, arg(0, "collection")?))
+                .child(text(airsync::ServerId, arg(1, "server-id")?));
+            if let Some(body_type) = args.get(2) {
+                fetch.push(
+                    Element::new(io::Options).child(
+                        Element::new(airsyncbase::BodyPreference)
+                            .child(text(airsyncbase::Type, body_type.as_str())),
+                    ),
+                );
+            }
+            let body = Element::new(io::ItemOperations).child(fetch);
             client.send("ItemOperations", Some(body)).await
         }
         "fetch-attachment" => {
-            let body = Element::new(io::ItemOperations).child(
-                Element::new(io::Fetch)
-                    .child(text(io::Store, "Mailbox"))
-                    .child(text(airsyncbase::FileReference, arg(0, "file-reference")?)),
-            );
+            let mut fetch = Element::new(io::Fetch)
+                .child(text(io::Store, "Mailbox"))
+                .child(text(airsyncbase::FileReference, arg(0, "file-reference")?));
+            if let Some(range) = args.get(1) {
+                fetch.push(Element::new(io::Options).child(text(io::Range, range.as_str())));
+            }
+            let body = Element::new(io::ItemOperations).child(fetch);
             client.send("ItemOperations", Some(body)).await
         }
         "meeting-response" => {

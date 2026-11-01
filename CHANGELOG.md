@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- Whole messages (MIME bodies) fetched with ItemOperations are streamed to
+  the device as they download, like attachments already were.
+- Ranged attachment fetches ask the JMAP server for just that range, and
+  read no further than needed from servers that send the whole file.
+
 ### Fixed
 
 - The WBXML decoder no longer accepts a global token in place of the root

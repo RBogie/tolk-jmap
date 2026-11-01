@@ -28,5 +28,3 @@ for what works today.
   tables wait until real mailboxes need them.
 - A mapping from mail domain to JMAP server, for one instance in front of
   several servers.
-- Stream whole-message (MIME) fetches and ranged attachment fetches, as
-  whole attachment fetches already are.
