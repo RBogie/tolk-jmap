@@ -8,6 +8,7 @@ it at startup with an error naming the variable.
 | Variable | Default | Meaning |
 |---|---|---|
 | `JMAP_URL` | required | Base URL of the JMAP server, e.g. `https://mail.example.com`. The session is discovered at `/.well-known/jmap`. A plain `http://` URL works but logs a warning, since every request carries the user's password. |
+| `JMAP_SERVERS` | empty | Other JMAP servers by mail domain, for one Tolk in front of several servers: comma separated `domain=url`, e.g. `example.org=https://jmap.example.org`. A login whose name ends in `@domain` goes to that server; other logins (short names, other domains, OAuth tokens) go to `JMAP_URL`. Device state of these servers' accounts is stored under `<host>/<account id>`, as `devices list` shows it. Readiness checks only `JMAP_URL`. |
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Address and port of the HTTP listener. The `healthcheck` subcommand uses the same port on 127.0.0.1. |
 | `STATE_DB` | `state.sqlite` | SQLite database with device, folder and sync state. Back it up together with its `-wal` file, or stop the service first. Before a schema migration a copy is written next to it as `<file>.v<old>-<timestamp>.bak`. |
 | `BACKUP_DIR` | `backups` next to `STATE_DB` | Where daily copies of the state database go (mode 0600). |

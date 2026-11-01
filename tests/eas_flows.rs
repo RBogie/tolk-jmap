@@ -3293,3 +3293,49 @@ async fn whole_messages_stream_into_item_operations() {
     assert_eq!(cut.child_text(base::Data), Some(&raw[..10]));
     assert_eq!(cut.child_text(base::Truncated), Some("1"));
 }
+
+#[tokio::test]
+async fn mail_domains_can_have_their_own_jmap_server() {
+    let (h, mapped) = Harness::start_mapped().await;
+    h.jmap.add_email("inbox", "On the default server", "x");
+    mapped.add_email("inbox", "On the mapped server", "x");
+    let subjects = |result: &support::SyncResult| -> Vec<String> {
+        result
+            .adds
+            .iter()
+            .filter_map(|a| a.find(airsync::ApplicationData)?.child_text(em::Subject))
+            .map(str::to_owned)
+            .collect()
+    };
+
+    // The full address goes to the server of its domain; both servers call
+    // their account a1, but the devices' state stays apart.
+    let (device, folders) = h.ready_device("d1").await;
+    let inbox = folders.id("Inbox");
+    let on_mapped = device.initial_sync(&inbox).await;
+    assert_eq!(subjects(&on_mapped), ["On the mapped server"]);
+
+    let mut other = h.device("d1");
+    other.user = support::fake_jmap::ALIAS.to_owned();
+    other.provision().await;
+    let folders = other.folder_sync().await;
+    let on_default = other.initial_sync(&folders.id("Inbox")).await;
+    assert_eq!(subjects(&on_default), ["On the default server"]);
+
+    // Changes on one server do not reach the other's device.
+    mapped.add_email("inbox", "Second", "x");
+    let next = device.sync(&inbox, &on_mapped.key, None).await;
+    assert_eq!(subjects(&next), ["Second"]);
+    let idle = other
+        .sync(&folders.id("Inbox"), &on_default.key, None)
+        .await;
+    assert!(idle.adds.is_empty());
+
+    // State of the mapped server's accounts is stored under its host.
+    let devices = h.state.store.list_devices().unwrap();
+    let mut users: Vec<&str> = devices.iter().map(|d| d.user.as_str()).collect();
+    users.sort_unstable();
+    let host = mapped.url.trim_start_matches("http://");
+    let scoped = format!("{host}/{}", support::fake_jmap::ACCOUNT);
+    assert_eq!(users, [scoped.as_str(), support::fake_jmap::ACCOUNT]);
+}

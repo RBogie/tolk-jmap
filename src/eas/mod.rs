@@ -544,7 +544,7 @@ async fn execute(
     let cmd = query.cmd.as_deref().unwrap_or_default();
     limits::check_request(device_id, query.device_type.as_deref()).map_err(CommandError::bad)?;
     // State is keyed by JMAP account, not by the login form the device uses.
-    let user = jmap.account_id().map_err(CommandError::Backend)?;
+    let user = &*jmap.user_key().map_err(CommandError::Backend)?;
     // A token is no login name to remember.
     if !creds.bearer {
         state.store.adopt_login(&creds.username, user)?;

@@ -32,23 +32,40 @@ impl Harness {
 
     /// With `traffic_dir`, the test user's traffic is captured there.
     pub async fn start_capturing(traffic_dir: Option<&std::path::Path>) -> Self {
-        Self::start_with(traffic_dir, None, Default::default()).await
+        Self::start_with(traffic_dir, None, Default::default(), None).await
     }
 
     /// On a copy of an existing state database (e.g. a restored backup).
     pub async fn start_on(db: &std::path::Path) -> Self {
-        Self::start_with(None, Some(db), Default::default()).await
+        Self::start_with(None, Some(db), Default::default(), None).await
     }
 
     /// With these limits.
     pub async fn start_tuned(tuning: tolk::config::Tuning) -> Self {
-        Self::start_with(None, None, tuning).await
+        Self::start_with(None, None, tuning, None).await
+    }
+
+    /// With a second server for the test user's mail domain
+    /// (`JMAP_SERVERS`): logins with the domain go there, the short login
+    /// name to `jmap`.
+    pub async fn start_mapped() -> (Self, FakeJmap) {
+        let mapped = FakeJmap::start().await;
+        let domain = fake_jmap::USER.rsplit_once('@').unwrap().1.to_owned();
+        let h = Self::start_with(
+            None,
+            None,
+            Default::default(),
+            Some((domain, mapped.url.clone())),
+        )
+        .await;
+        (h, mapped)
     }
 
     async fn start_with(
         traffic_dir: Option<&std::path::Path>,
         db: Option<&std::path::Path>,
         tuning: tolk::config::Tuning,
+        mapped: Option<(String, String)>,
     ) -> Self {
         // Warnings and errors show up in the output of failing tests.
         let _ = tracing_subscriber::fmt()
@@ -66,6 +83,7 @@ impl Harness {
         let config = Config {
             listen_addr: "127.0.0.1:0".parse().unwrap(),
             jmap_url: jmap.url.clone(),
+            jmap_servers: mapped.into_iter().collect(),
             state_db: dir.path().join("state.sqlite"),
             traffic_dir: traffic_dir.map(Into::into),
             traffic_capture: vec![fake_jmap::USER.to_owned()],

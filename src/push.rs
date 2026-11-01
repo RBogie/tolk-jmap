@@ -164,7 +164,9 @@ impl PushHub {
     /// The account's notifier; keep the `Arc` for as long as you listen.
     /// Shared by every login of the account (keyed like the store).
     pub fn account(&self, jmap: &JmapClient) -> Arc<AccountPush> {
-        let key = jmap.account_id().unwrap_or(jmap.username()).to_owned();
+        let key = jmap
+            .user_key()
+            .map_or_else(|_| jmap.username().to_owned(), |key| key.into_owned());
         let mut accounts = self.accounts.locked();
         accounts.retain(|_, weak| weak.strong_count() > 0);
         // A listener that stopped (its login was rejected) is replaced, so

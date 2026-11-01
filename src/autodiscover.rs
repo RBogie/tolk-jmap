@@ -84,7 +84,7 @@ pub async fn handle(
     if schema.is_some_and(|s| s != MOBILESYNC_SCHEMA) {
         // Outlook desktop asks for IMAP and SMTP settings: the JMAP server
         // (Stalwart) answers those.
-        return forward(&state, peer, &headers, body).await;
+        return forward(&state, peer, &headers, &address, body).await;
     }
 
     let Some(creds) = Credentials::from_headers(&headers) else {
@@ -124,7 +124,13 @@ pub async fn handle(
 
 /// The JMAP server's answer to a request for another schema, or error 601
 /// when it has none.
-async fn forward(state: &AppState, peer: SocketAddr, headers: &HeaderMap, body: Bytes) -> Response {
+async fn forward(
+    state: &AppState,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    address: &str,
+    body: Bytes,
+) -> Response {
     let header = |name| {
         headers
             .get(name)
@@ -134,6 +140,7 @@ async fn forward(state: &AppState, peer: SocketAddr, headers: &HeaderMap, body: 
     match state
         .jmap
         .forward_autodiscover(
+            address,
             header(header::AUTHORIZATION),
             header(header::CONTENT_TYPE),
             client_ip,

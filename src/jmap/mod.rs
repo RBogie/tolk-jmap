@@ -222,33 +222,85 @@ pub struct Account {
 /// User name and a keyed hash of the password.
 type SessionKey = (String, u64);
 
+/// One JMAP server Tolk talks to.
+struct Server {
+    session_url: String,
+    /// The server's base URL.
+    base_url: String,
+    /// What device state of its accounts is stored under besides the account
+    /// id: `None` for `JMAP_URL`, the host for a server from `JMAP_SERVERS`
+    /// (account ids of different servers can be the same).
+    scope: Option<Arc<str>>,
+    caches: Arc<Caches>,
+}
+
+impl Server {
+    fn new(base_url: &str, scope: Option<Arc<str>>) -> Arc<Self> {
+        Arc::new(Self {
+            session_url: format!("{base_url}/.well-known/jmap"),
+            base_url: base_url.to_owned(),
+            scope,
+            caches: Arc::default(),
+        })
+    }
+}
+
 /// Caches sessions per credentials; a cache hit also skips re-verifying them.
 pub struct JmapPool {
     http: reqwest::Client,
-    session_url: String,
-    /// The JMAP server's base URL.
-    base_url: String,
+    /// `JMAP_URL`: logins without a mapped mail domain.
+    default: Arc<Server>,
+    /// `JMAP_SERVERS`: by mail domain (lowercase).
+    by_domain: Vec<(String, Arc<Server>)>,
     ttl: Duration,
     /// Keyed by user and a keyed hash of the password, so the cache does not
     /// hold passwords as keys and a changed password misses it.
     sessions: Mutex<HashMap<SessionKey, (Instant, Arc<Session>)>>,
     key_hasher: std::hash::RandomState,
-    caches: Arc<Caches>,
 }
 
 impl JmapPool {
     pub fn new(config: &Config) -> anyhow::Result<Self> {
+        let default = Server::new(&config.jmap_url, None);
+        let mut servers: Vec<Arc<Server>> = Vec::new();
+        let by_domain = config
+            .jmap_servers
+            .iter()
+            .map(|(domain, url)| {
+                let server = if *url == config.jmap_url {
+                    default.clone()
+                } else if let Some(known) = servers.iter().find(|s| s.base_url == *url) {
+                    known.clone()
+                } else {
+                    let server = Server::new(url, Some(host_of(url).into()));
+                    servers.push(server.clone());
+                    server
+                };
+                (domain.to_ascii_lowercase(), server)
+            })
+            .collect();
         Ok(Self {
             http: crate::http_client()
                 .timeout(Duration::from_secs(30))
                 .build()?,
-            session_url: format!("{}/.well-known/jmap", config.jmap_url),
-            base_url: config.jmap_url.clone(),
+            default,
+            by_domain,
             ttl: config.auth_cache_ttl,
             sessions: Mutex::new(HashMap::new()),
             key_hasher: std::hash::RandomState::new(),
-            caches: Arc::default(),
         })
+    }
+
+    /// The server for a login name or address: by its mail domain, else
+    /// `JMAP_URL`.
+    fn server_for(&self, user: &str) -> &Arc<Server> {
+        user.rsplit_once('@')
+            .and_then(|(_, domain)| {
+                self.by_domain
+                    .iter()
+                    .find(|(d, _)| d.eq_ignore_ascii_case(domain))
+            })
+            .map_or(&self.default, |(_, server)| server)
     }
 
     /// Verifies the credentials and returns a client acting for `client_ip`.
@@ -257,10 +309,11 @@ impl JmapPool {
         creds: &Credentials,
         client_ip: Option<IpAddr>,
     ) -> Result<JmapClient, AuthError> {
+        let server = self.server_for(&creds.username);
         let session = match self.cached(creds) {
             Some(session) => session,
             None => {
-                let session = Arc::new(self.fetch_session(creds, client_ip).await?);
+                let session = Arc::new(self.fetch_session(server, creds, client_ip).await?);
                 self.sessions
                     .locked()
                     .insert(self.cache_key(creds), (Instant::now(), session.clone()));
@@ -272,16 +325,19 @@ impl JmapPool {
             session,
             creds: creds.clone(),
             client_ip,
-            caches: self.caches.clone(),
+            caches: server.caches.clone(),
+            scope: server.scope.clone(),
             account: None,
         })
     }
 
-    /// Whether the JMAP server answers at all (readiness check). Any HTTP
-    /// response counts, including the 401 an anonymous request gets.
+    /// Whether the `JMAP_URL` server answers at all (readiness check). Any
+    /// HTTP response counts, including the 401 an anonymous request gets.
+    /// Servers from `JMAP_SERVERS` are left out: one of them being down
+    /// should not take Tolk away from everyone else.
     pub async fn reachable(&self) -> anyhow::Result<()> {
         self.http
-            .get(&self.session_url)
+            .get(&self.default.session_url)
             .timeout(Duration::from_secs(5))
             .send()
             .await?;
@@ -293,22 +349,27 @@ impl JmapPool {
         self.sessions
             .locked()
             .retain(|_, (at, _)| at.elapsed() < self.ttl);
-        self.caches.people.prune();
-        self.caches.identities.prune();
+        for server in std::iter::once(&self.default).chain(self.by_domain.iter().map(|(_, s)| s)) {
+            server.caches.people.prune();
+            server.caches.identities.prune();
+        }
     }
 
     /// Passes an Autodiscover request we do not answer (Outlook desktop's
-    /// IMAP and SMTP settings) on to the JMAP server, which may.
+    /// IMAP and SMTP settings) on to the JMAP server of `address`, which may.
     pub async fn forward_autodiscover(
         &self,
+        address: &str,
         authorization: Option<&str>,
         content_type: Option<&str>,
         client_ip: IpAddr,
         body: Vec<u8>,
     ) -> anyhow::Result<(u16, Option<String>, Vec<u8>)> {
         let mut request = forwarded_for(
-            self.http
-                .post(format!("{}/autodiscover/autodiscover.xml", self.base_url)),
+            self.http.post(format!(
+                "{}/autodiscover/autodiscover.xml",
+                self.server_for(address).base_url
+            )),
             Some(client_ip),
         )
         .timeout(Duration::from_secs(10))
@@ -352,10 +413,11 @@ impl JmapPool {
 
     async fn fetch_session(
         &self,
+        server: &Server,
         creds: &Credentials,
         client_ip: Option<IpAddr>,
     ) -> Result<Session, AuthError> {
-        let response = forwarded_for(self.http.get(&self.session_url), client_ip)
+        let response = forwarded_for(self.http.get(&server.session_url), client_ip)
             .credentials(creds)
             .send()
             .await
@@ -381,6 +443,17 @@ impl JmapPool {
             ))),
         }
     }
+}
+
+/// `https://mail.example.org:8443/x` as `mail.example.org:8443`.
+fn host_of(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| match u.port() {
+            Some(port) => Some(format!("{}:{port}", u.host_str()?)),
+            None => u.host_str().map(str::to_owned),
+        })
+        .unwrap_or_else(|| url.to_owned())
 }
 
 fn forwarded_for(request: reqwest::RequestBuilder, ip: Option<IpAddr>) -> reqwest::RequestBuilder {
@@ -481,6 +554,8 @@ pub struct JmapClient {
     creds: Credentials,
     client_ip: Option<IpAddr>,
     caches: Arc<Caches>,
+    /// See [`Server::scope`].
+    scope: Option<Arc<str>>,
     /// Another account (shared with the user) that contacts and calendar
     /// calls go to, instead of the primary ones (see [`Self::in_account`]).
     account: Option<Arc<str>>,
@@ -491,10 +566,20 @@ impl JmapClient {
         &self.session.username
     }
 
-    /// The JMAP mail account; device state is stored under it, so every
-    /// login form of one account (`rob`, `rob@example.com`) shares it.
+    /// The JMAP mail account.
     pub fn account_id(&self) -> anyhow::Result<&str> {
         self.primary(MAIL)
+    }
+
+    /// What device state is stored under: the mail account, so every login
+    /// form of one account (`rob`, `rob@example.com`) shares it, prefixed
+    /// with the server's host for a server from `JMAP_SERVERS`.
+    pub fn user_key(&self) -> anyhow::Result<std::borrow::Cow<'_, str>> {
+        let account = self.account_id()?;
+        Ok(match &self.scope {
+            None => account.into(),
+            Some(scope) => format!("{scope}/{account}").into(),
+        })
     }
 
     /// The account mail calls go to: the shared one, else the primary.
@@ -965,6 +1050,7 @@ impl JmapClient {
             },
             client_ip: None,
             caches: Arc::default(),
+            scope: None,
             account: None,
         }
     }

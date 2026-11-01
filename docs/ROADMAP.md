@@ -26,5 +26,3 @@ for what works today.
 - Large mailboxes: sync state is stored as JSON snapshots per collection.
   A 50,000-message folder syncs incrementally in about 35 ms, so row-based
   tables wait until real mailboxes need them.
-- A mapping from mail domain to JMAP server, for one instance in front of
-  several servers.
