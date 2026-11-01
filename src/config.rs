@@ -13,6 +13,9 @@ pub struct Config {
     pub listen_addr: SocketAddr,
     /// Base URL of the JMAP server, e.g. `https://mail.example.com`.
     pub jmap_url: String,
+    /// Other JMAP servers by mail domain (`JMAP_SERVERS`: comma separated
+    /// `domain=url`); logins for other domains go to `jmap_url`.
+    pub jmap_servers: Vec<(String, String)>,
     /// SQLite database with device and sync state.
     pub state_db: PathBuf,
     /// Where raw EAS traffic is written. Unset disables traffic logging.
@@ -178,6 +181,7 @@ impl Config {
             .context("JMAP_URL must be set")?
             .trim_end_matches('/')
             .to_owned();
+        let jmap_servers = parse_servers(&list("JMAP_SERVERS"))?;
         let state_db = PathBuf::from(env_or("STATE_DB", "state.sqlite"));
         let traffic_dir = std::env::var_os("TRAFFIC_DIR").map(PathBuf::from);
         let traffic_capture = list("TRAFFIC_CAPTURE");
@@ -225,11 +229,13 @@ impl Config {
                 SUPPORTED_EAS_VERSIONS.join(", ")
             );
         }
-        if jmap_url.starts_with("http://") {
-            tracing::warn!(
-                jmap_url,
-                "JMAP_URL is not HTTPS: passwords travel unencrypted to the JMAP server"
-            );
+        for url in std::iter::once(&jmap_url).chain(jmap_servers.iter().map(|(_, url)| url)) {
+            if url.starts_with("http://") {
+                tracing::warn!(
+                    url,
+                    "JMAP server URL is not HTTPS: passwords travel unencrypted to it"
+                );
+            }
         }
         let backup_dir = std::env::var_os("BACKUP_DIR").map_or_else(
             || {
@@ -243,6 +249,7 @@ impl Config {
         Ok(Self {
             listen_addr,
             jmap_url,
+            jmap_servers,
             state_db,
             traffic_dir,
             traffic_capture,
@@ -318,6 +325,28 @@ impl Cidr {
 }
 
 /// A comma separated environment variable, empty entries dropped.
+/// `JMAP_SERVERS` entries (`domain=url`) as (domain, url).
+fn parse_servers(entries: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    entries
+        .iter()
+        .map(|entry| {
+            let (domain, url) = entry
+                .split_once('=')
+                .with_context(|| format!("JMAP_SERVERS: {entry} is not domain=url"))?;
+            let (domain, url) = (domain.trim(), url.trim().trim_end_matches('/'));
+            anyhow::ensure!(
+                !domain.is_empty() && !domain.contains('@'),
+                "JMAP_SERVERS: {domain:?} is not a mail domain"
+            );
+            anyhow::ensure!(
+                url.starts_with("https://") || url.starts_with("http://"),
+                "JMAP_SERVERS: {url} must start with https://"
+            );
+            Ok((domain.to_ascii_lowercase(), url.to_owned()))
+        })
+        .collect()
+}
+
 fn list(key: &str) -> Vec<String> {
     env_or(key, "")
         .split(',')
@@ -334,6 +363,21 @@ fn env_or(key: &str, default: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_jmap_servers() {
+        let entries = ["Example.org=https://jmap.example.org/".to_owned()];
+        assert_eq!(
+            parse_servers(&entries).unwrap(),
+            [(
+                "example.org".to_owned(),
+                "https://jmap.example.org".to_owned()
+            )]
+        );
+        for bad in ["example.org", "=https://x", "a@b=https://x", "b=ftp://x"] {
+            assert!(parse_servers(&[bad.to_owned()]).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn matches_cidr_ranges() {

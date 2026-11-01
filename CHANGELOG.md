@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- `JMAP_SERVERS`: one Tolk in front of several JMAP servers, chosen by the
+  mail domain of the login.
+
 ### Changed
 
 - Whole messages (MIME bodies) fetched with ItemOperations are streamed to
