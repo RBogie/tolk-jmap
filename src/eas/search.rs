@@ -220,7 +220,7 @@ async fn search_mailbox(
     let (page, total) = mailbox_page(req, jmap, filter, folder.as_ref(), start, end, &body).await?;
     let mut found = Vec::new();
     for hit in page {
-        let data = email::application_data(&hit.email, &body, jmap).await?;
+        let data = email::application_data(&hit.email, &body, jmap, None).await?;
         found.push(
             Element::new(sp::Result)
                 .child(Element::with_text(airsync::Class, "Email"))

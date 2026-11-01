@@ -909,6 +909,19 @@ impl JmapClient {
         name: &str,
         mime_type: &str,
     ) -> anyhow::Result<reqwest::Response> {
+        self.download_range(blob_id, name, mime_type, None).await
+    }
+
+    /// [`Self::download_stream`] asking for bytes `start..=end` only. Servers
+    /// need not honour it: a 206 answer is the range, a 200 answer the
+    /// whole blob.
+    pub async fn download_range(
+        &self,
+        blob_id: &str,
+        name: &str,
+        mime_type: &str,
+        range: Option<(u64, u64)>,
+    ) -> anyhow::Result<reqwest::Response> {
         let url = self
             .session
             .download_url
@@ -916,7 +929,11 @@ impl JmapClient {
             .replace("{blobId}", &encode_component(blob_id))
             .replace("{name}", &encode_component(name))
             .replace("{type}", &encode_component(mime_type));
-        Ok(forwarded_for(self.http.get(url), self.client_ip)
+        let mut request = forwarded_for(self.http.get(url), self.client_ip);
+        if let Some((start, end)) = range {
+            request = request.header(reqwest::header::RANGE, format!("bytes={start}-{end}"));
+        }
+        Ok(request
             .credentials(&self.creds)
             .send()
             .await?

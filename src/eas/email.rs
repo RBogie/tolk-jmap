@@ -2,12 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::jscalendar;
+use super::{
+    jscalendar,
+    stream::{Downloads, Encoding},
+};
 
 use crate::{
     jmap::{BodyPart, BodyValues, Email, EmailAddress, JmapClient},
     wbxml::{
-        Element,
+        Element, Node,
         cp::{airsyncbase as base, email, email2},
     },
 };
@@ -64,10 +67,13 @@ impl BodyPreference {
     }
 }
 
+/// With `downloads`, a whole MIME body is streamed into the response
+/// instead of read into memory first.
 pub async fn application_data(
     msg: &Email,
     body: &BodyPreference,
     jmap: &JmapClient,
+    downloads: Option<&Downloads>,
 ) -> anyhow::Result<Element> {
     let mut data = Element::new(crate::wbxml::cp::airsync::ApplicationData);
     let mut text = |tag, value: Option<String>| {
@@ -95,7 +101,7 @@ pub async fn application_data(
                 }),
         );
     }
-    data.push(body_element(msg, body, jmap).await?);
+    data.push(body_element(msg, body, jmap, downloads).await?);
     let invite = invitation(msg, jmap).await;
     let message_class = match invite
         .as_ref()
@@ -289,32 +295,41 @@ async fn body_element(
     msg: &Email,
     pref: &BodyPreference,
     jmap: &JmapClient,
+    downloads: Option<&Downloads>,
 ) -> anyhow::Result<Element> {
-    let (data, estimated, mut truncated) = match pref.body_type {
-        body_type::MIME => {
+    let whole = pref
+        .truncation_size
+        .is_none_or(|limit| msg.size <= u64::from(limit));
+    let (data, estimated, truncated) = match (pref.body_type, downloads) {
+        (body_type::MIME, Some(downloads)) if whole => {
+            let raw = jmap
+                .download_stream(&msg.blob_id, "message.eml", "message/rfc822")
+                .await?;
+            (downloads.add(raw, Encoding::Text), msg.size, false)
+        }
+        (body_type::MIME, _) => {
             let raw = jmap
                 .download(&msg.blob_id, "message.eml", "message/rfc822")
                 .await?;
             // Data is a WBXML string; 8-bit raw messages lose invalid bytes.
-            (String::from_utf8_lossy(&raw).into_owned(), msg.size, false)
+            truncate(
+                String::from_utf8_lossy(&raw).into_owned(),
+                msg.size,
+                false,
+                pref,
+            )
         }
-        kind => {
+        (kind, _) => {
             let want_html = kind == body_type::HTML;
             let parts = if want_html {
                 &msg.html_body
             } else {
                 &msg.text_body
             };
-            collect_text(msg, parts, want_html)
+            let (data, estimated, truncated) = collect_text(msg, parts, want_html);
+            truncate(data, estimated, truncated, pref)
         }
     };
-    let mut data = data;
-    if let Some(limit) = pref.truncation_size.map(|l| l as usize)
-        && data.len() > limit
-    {
-        data.truncate(floor_char_boundary(&data, limit));
-        truncated = true;
-    }
 
     let mut el = Element::new(base::Body)
         .child(Element::with_text(base::Type, pref.body_type.to_string()))
@@ -326,7 +341,10 @@ async fn body_element(
         el.push(Element::with_text(base::Truncated, "1"));
     }
     if !(truncated && pref.all_or_none) {
-        el.push(Element::with_text(base::Data, data));
+        el.push(Element {
+            tag: base::Data,
+            children: vec![data],
+        });
     }
     if let Some(chars) = pref.preview.filter(|n| *n > 0)
         && let Some(preview) = msg.preview.as_deref().filter(|p| !p.is_empty())
@@ -335,6 +353,22 @@ async fn body_element(
         el.push(Element::with_text(base::Preview, preview));
     }
     Ok(el)
+}
+
+/// The body text cut to the preference's TruncationSize, as the Data node.
+fn truncate(
+    mut data: String,
+    estimated: u64,
+    mut truncated: bool,
+    pref: &BodyPreference,
+) -> (Node, u64, bool) {
+    if let Some(limit) = pref.truncation_size.map(|l| l as usize)
+        && data.len() > limit
+    {
+        data.truncate(floor_char_boundary(&data, limit));
+        truncated = true;
+    }
+    (Node::Text(data), estimated, truncated)
 }
 
 /// Joins the text parts' values, converting between plain and HTML as needed.

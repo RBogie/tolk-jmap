@@ -1890,10 +1890,52 @@ async fn attachments_stream_into_item_operations() {
     assert!(reply.status.is_success());
     assert_eq!(data(&reply), file);
 
+    // Ranges come from the server, or are cut from the whole blob when the
+    // server ignores the Range header.
+    let range = |reply: &support::Reply| -> (String, String, String) {
+        let fetch = reply
+            .root()
+            .find(io::Response)
+            .and_then(|r| r.find(io::Fetch))
+            .unwrap();
+        let properties = fetch.find(io::Properties);
+        let field = |tag| {
+            properties
+                .and_then(|p| p.child_text(tag))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        (
+            fetch.child_text(io::Status).unwrap_or_default().to_owned(),
+            field(io::Range),
+            field(io::Total),
+        )
+    };
+    for ignore in [false, true] {
+        h.jmap.change(|m| m.ignore_ranges = ignore);
+        let reply = device
+            .send("ItemOperations", Some(fetch(Some("10-19"))))
+            .await;
+        assert_eq!(data(&reply), file[10..20], "ignoring ranges: {ignore}");
+        assert_eq!(
+            range(&reply),
+            ("1".to_owned(), "10-19".to_owned(), "300001".to_owned())
+        );
+        let reply = device
+            .send("ItemOperations", Some(fetch(Some("300000-400000"))))
+            .await;
+        assert_eq!(data(&reply), file[300_000..]);
+        assert_eq!(range(&reply).1, "300000-300000");
+        let reply = device
+            .send("ItemOperations", Some(fetch(Some("300001-400000"))))
+            .await;
+        assert_eq!(range(&reply).0, "8", "past the end");
+    }
+    h.jmap.read(|m| assert_eq!(m.ranges[0], "bytes=10-19"));
     let reply = device
-        .send("ItemOperations", Some(fetch(Some("10-19"))))
+        .send("ItemOperations", Some(fetch(Some("9-1"))))
         .await;
-    assert_eq!(data(&reply), file[10..20]);
+    assert_eq!(range(&reply).0, "8", "backwards");
 
     // A missing blob is a status, not a broken stream.
     let missing = Element::new(io::ItemOperations).child(
@@ -3195,4 +3237,59 @@ async fn compose_rejects_unusable_messages() {
         .send("SendMail", Some(smart(cm::SendMail, "c-2", None, mime)))
         .await;
     assert_eq!(compose_status(&reply).as_deref(), Some("120"));
+}
+
+#[tokio::test]
+async fn whole_messages_stream_into_item_operations() {
+    use tolk::wbxml::cp::{airsyncbase as base, item_operations as io};
+    let h = Harness::start().await;
+    let email = h.jmap.add_email("inbox", "Raw", "Body text");
+    // A raw message with a non-UTF-8 byte and a NUL, which a WBXML string
+    // cannot carry.
+    let raw = h.jmap.change(|m| {
+        let blob = m.get("Email", &email).unwrap()["blobId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let entry = m.blobs.get_mut(&blob).unwrap();
+        entry.0.extend_from_slice(b"caf\xE9 \0end\r\n");
+        String::from_utf8_lossy(&entry.0).replace('\0', "")
+    });
+    let (device, folders) = h.ready_device("d1").await;
+    let inbox = folders.id("Inbox");
+    let server_id = device.initial_sync(&inbox).await.add_ids()[0].clone();
+    let fetch = |truncation: Option<&str>| {
+        let mut preference = Element::new(base::BodyPreference).child(text(base::Type, "4"));
+        if let Some(size) = truncation {
+            preference.push(text(base::TruncationSize, size));
+        }
+        Element::new(io::ItemOperations).child(
+            Element::new(io::Fetch)
+                .child(text(io::Store, "Mailbox"))
+                .child(text(airsync::CollectionId, inbox.clone()))
+                .child(text(airsync::ServerId, server_id.clone()))
+                .child(Element::new(io::Options).child(preference)),
+        )
+    };
+    let body = |reply: &support::Reply| {
+        reply
+            .root()
+            .find(io::Response)
+            .and_then(|r| r.find(io::Fetch))
+            .and_then(|f| f.find(io::Properties))
+            .and_then(|p| p.find(base::Body))
+            .unwrap()
+            .clone()
+    };
+
+    let reply = device.send("ItemOperations", Some(fetch(None))).await;
+    let streamed = body(&reply);
+    assert_eq!(streamed.child_text(base::Data), Some(raw.as_str()));
+    assert_eq!(streamed.find(base::Truncated), None);
+
+    // A truncated body is cut from the downloaded message instead.
+    let reply = device.send("ItemOperations", Some(fetch(Some("10")))).await;
+    let cut = body(&reply);
+    assert_eq!(cut.child_text(base::Data), Some(&raw[..10]));
+    assert_eq!(cut.child_text(base::Truncated), Some("1"));
 }

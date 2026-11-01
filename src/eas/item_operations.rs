@@ -9,13 +9,14 @@
 //! one. With `<DeleteSubFolders>` the folders below it go too.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use futures_util::StreamExt;
 
 use serde_json::{Map, json};
 
 use super::{
     CommandError, CommandResult, Request,
     email::{self, BodyPreference},
-    search, sync,
+    search, stream, sync,
 };
 use crate::{
     jmap::{self, JmapClient},
@@ -213,7 +214,8 @@ fn fetch_status(status: &str) -> Element {
 }
 
 /// An attachment: streamed into the response as it downloads, or for a
-/// Range request, downloaded and cut.
+/// Range request, only that range read (the server is asked for it, and cut
+/// from the whole blob if it ignores that).
 async fn fetch_attachment(
     req: &Request<'_>,
     jmap: &JmapClient,
@@ -225,8 +227,13 @@ async fn fetch_attachment(
         Some(account) => std::borrow::Cow::Owned(jmap.in_account(account)),
         None => std::borrow::Cow::Borrowed(jmap),
     };
+    let requested = match range.map(parse_range) {
+        Some(None) => return Ok(fetch_status(status::BAD_RANGE)),
+        Some(range) => range,
+        None => None,
+    };
     let download = match jmap
-        .download_stream(blob_id, "attachment", content_type)
+        .download_range(blob_id, "attachment", content_type, requested)
         .await
     {
         Ok(download) => download,
@@ -236,13 +243,10 @@ async fn fetch_attachment(
                 error = format!("{e:#}"),
                 "attachment download failed"
             );
-            let not_found = e
-                .downcast_ref::<reqwest::Error>()
-                .is_some_and(|e| e.status() == Some(reqwest::StatusCode::NOT_FOUND));
-            let status = if not_found {
-                status::INVALID_ATTACHMENT
-            } else {
-                status::SERVER_ERROR
+            let status = match e.downcast_ref::<reqwest::Error>().and_then(|e| e.status()) {
+                Some(reqwest::StatusCode::NOT_FOUND) => status::INVALID_ATTACHMENT,
+                Some(reqwest::StatusCode::RANGE_NOT_SATISFIABLE) => status::BAD_RANGE,
+                _ => status::SERVER_ERROR,
             };
             return Ok(fetch_status(status)
                 .child(Element::with_text(airsyncbase::FileReference, reference)));
@@ -251,22 +255,21 @@ async fn fetch_attachment(
 
     let mut properties = Element::new(io::Properties)
         .child(Element::with_text(airsyncbase::ContentType, content_type));
-    match range {
-        Some(range) => {
-            let data = download.bytes().await.map_err(anyhow::Error::from)?;
-            let Some((start, end)) = parse_range(range, data.len()) else {
+    match requested {
+        Some((start, end)) => {
+            let Some(part) = read_range(download, start, end).await? else {
                 return Ok(fetch_status(status::BAD_RANGE));
             };
-            properties.push(Element::with_text(io::Range, format!("{start}-{end}")));
-            properties.push(Element::with_text(io::Total, data.len().to_string()));
             properties.push(Element::with_text(
-                io::Data,
-                STANDARD.encode(&data[start..=end]),
+                io::Range,
+                format!("{}-{}", part.start, part.end),
             ));
+            properties.push(Element::with_text(io::Total, part.total.to_string()));
+            properties.push(Element::with_text(io::Data, STANDARD.encode(&part.data)));
         }
         None => properties.push(Element {
             tag: io::Data,
-            children: vec![req.downloads.add(download)],
+            children: vec![req.downloads.add(download, stream::Encoding::Base64)],
         }),
     }
     Ok(fetch_status(status::OK)
@@ -274,13 +277,85 @@ async fn fetch_attachment(
         .child(properties))
 }
 
-/// `start-end` (inclusive) clamped to the data; `None` when unusable.
-fn parse_range(range: &str, len: usize) -> Option<(usize, usize)> {
+/// `start-end` (inclusive); `None` when unusable.
+fn parse_range(range: &str) -> Option<(u64, u64)> {
     let (start, end) = range.split_once('-')?;
-    let start: usize = start.trim().parse().ok()?;
-    let end: usize = end.trim().parse().ok()?;
-    let end = end.min(len.checked_sub(1)?);
+    let start: u64 = start.trim().parse().ok()?;
+    let end: u64 = end.trim().parse().ok()?;
     (start <= end).then_some((start, end))
+}
+
+/// The bytes of an attachment a Range fetch returns.
+#[derive(Debug, PartialEq, Eq)]
+struct RangePart {
+    start: u64,
+    end: u64,
+    total: u64,
+    data: Vec<u8>,
+}
+
+/// Reads `start..=end` of a download answered with 206 (the range itself)
+/// or 200 (the whole blob, read only as far as needed when its length is
+/// known). `None` when the range starts past the end.
+async fn read_range(
+    download: reqwest::Response,
+    start: u64,
+    end: u64,
+) -> anyhow::Result<Option<RangePart>> {
+    if download.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        let content_range = download
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_content_range);
+        let Some((start, total)) = content_range else {
+            anyhow::bail!("206 answer without a usable Content-Range");
+        };
+        let data = download.bytes().await?.to_vec();
+        let Some(last) = (data.len() as u64).checked_sub(1) else {
+            return Ok(None);
+        };
+        return Ok(Some(RangePart {
+            start,
+            end: start + last,
+            total,
+            data,
+        }));
+    }
+    let known_total = download.content_length();
+    let mut bytes = download.bytes_stream();
+    let mut data = Vec::new();
+    let mut offset = 0u64;
+    while let Some(chunk) = bytes.next().await {
+        let chunk = chunk?;
+        let chunk_start = offset;
+        offset += chunk.len() as u64;
+        if offset > start && chunk_start <= end {
+            let from = start.saturating_sub(chunk_start) as usize;
+            let to = (end + 1 - chunk_start).min(chunk.len() as u64) as usize;
+            data.extend_from_slice(&chunk[from..to]);
+        }
+        if offset > end && known_total.is_some() {
+            break;
+        }
+    }
+    let total = known_total.unwrap_or(offset);
+    if start >= total {
+        return Ok(None);
+    }
+    Ok(Some(RangePart {
+        start,
+        end: end.min(total - 1),
+        total,
+        data,
+    }))
+}
+
+/// `bytes 10-19/100` as (10, 100).
+fn parse_content_range(value: &str) -> Option<(u64, u64)> {
+    let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, _) = range.split_once('-')?;
+    Some((start.trim().parse().ok()?, total.trim().parse().ok()?))
 }
 
 async fn fetch_item(
@@ -309,7 +384,7 @@ async fn fetch_item(
     let Some(msg) = emails.first() else {
         return Ok(fetch_status(status::NOT_FOUND));
     };
-    let data = email::application_data(msg, body, jmap).await?;
+    let data = email::application_data(msg, body, jmap, Some(&req.downloads)).await?;
     Ok(fetch_status(status::OK)
         .child(Element::with_text(airsync::CollectionId, collection_id))
         .child(Element::with_text(airsync::ServerId, server_id))
@@ -326,12 +401,12 @@ mod tests {
 
     #[test]
     fn parses_ranges() {
-        assert_eq!(parse_range("0-9", 100), Some((0, 9)));
-        assert_eq!(parse_range("90-200", 100), Some((90, 99)));
-        assert_eq!(parse_range("100-200", 100), None);
-        assert_eq!(parse_range("5-1", 100), None);
-        assert_eq!(parse_range("0-9", 0), None);
-        assert_eq!(parse_range("x", 10), None);
+        assert_eq!(parse_range("0-9"), Some((0, 9)));
+        assert_eq!(parse_range(" 90 - 200 "), Some((90, 200)));
+        assert_eq!(parse_range("5-1"), None);
+        assert_eq!(parse_range("x"), None);
+        assert_eq!(parse_content_range("bytes 10-19/100"), Some((10, 100)));
+        assert_eq!(parse_content_range("bytes 10-19/*"), None);
     }
 
     #[test]

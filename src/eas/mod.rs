@@ -176,7 +176,7 @@ pub struct EasResponse {
     /// which is what traffic capture records.
     pub body: Bytes,
     /// The body to send instead, when attachments are streamed into it.
-    streamed: Option<(Vec<wbxml::Chunk>, Vec<reqwest::Response>)>,
+    streamed: Option<(Vec<wbxml::Chunk>, Vec<stream::Download>)>,
 }
 
 impl EasResponse {
@@ -227,7 +227,7 @@ impl EasResponse {
         response
     }
 
-    fn streamed(root: &Element, downloads: Vec<reqwest::Response>) -> Self {
+    fn streamed(root: &Element, downloads: Vec<stream::Download>) -> Self {
         let mut response = Self::wbxml(root);
         let chunks = wbxml::encode_parts(root);
         if let Some(length) = stream::length(&chunks, &downloads) {
@@ -520,7 +520,7 @@ fn protocol_version(headers: &HeaderMap, query: &query::EasQuery) -> u16 {
 enum Outcome {
     Wbxml(Element),
     /// A document with attachments streamed into it (see [`stream`]).
-    Streamed(Element, Vec<reqwest::Response>),
+    Streamed(Element, Vec<stream::Download>),
     /// Success without a body (SendMail and friends).
     Empty,
     NotImplemented,
