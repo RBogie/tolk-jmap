@@ -1977,6 +1977,12 @@ async fn oauth_tokens_work_like_passwords() {
         .send_as("FolderSync", None, "wrong-token")
         .await;
     assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+
+    // A valid token without the mail scope gets no mail account: refused.
+    let reply = token_device
+        .send_as("FolderSync", None, support::fake_jmap::SCOPELESS_TOKEN)
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -3338,4 +3344,70 @@ async fn mail_domains_can_have_their_own_jmap_server() {
     let host = mapped.url.trim_start_matches("http://");
     let scoped = format!("{host}/{}", support::fake_jmap::ACCOUNT);
     assert_eq!(users, [scoped.as_str(), support::fake_jmap::ACCOUNT]);
+}
+
+#[tokio::test]
+async fn oauth_discovery_is_advertised_only_when_configured() {
+    let path = "/.well-known/oauth-protected-resource/Microsoft-Server-ActiveSync";
+    let http = tolk::http_client().build().unwrap();
+    let challenges = |h: &Harness| {
+        let url = format!(
+            "{}/Microsoft-Server-ActiveSync?Cmd=FolderSync&User=x&DeviceId=d1&DeviceType=Test",
+            h.url
+        );
+        let http = http.clone();
+        async move {
+            let response = http
+                .post(url)
+                .basic_auth("nobody", Some("wrong"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            response
+                .headers()
+                .get_all("www-authenticate")
+                .iter()
+                .map(|v| v.to_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        }
+    };
+
+    // By default: Basic only, and no metadata.
+    let h = Harness::start().await;
+    assert_eq!(challenges(&h).await, ["Basic realm=\"ActiveSync\""]);
+    let metadata = http.get(format!("{}{path}", h.url)).send().await.unwrap();
+    assert_eq!(metadata.status(), StatusCode::NOT_FOUND);
+
+    // With OAUTH_ISSUER: Bearer after Basic, pointing at the metadata.
+    let h = Harness::start_with_oauth("https://auth.example.com").await;
+    let host = h.url.trim_start_matches("http://");
+    let found = challenges(&h).await;
+    assert_eq!(found[0], "Basic realm=\"ActiveSync\"");
+    assert!(
+        found[1].starts_with(&format!(
+            "Bearer resource_metadata=\"https://{host}{path}\""
+        )),
+        "{found:?}"
+    );
+    assert!(
+        found[1].contains("urn:ietf:params:oauth:scope:mail"),
+        "{found:?}"
+    );
+    let metadata: serde_json::Value = http
+        .get(format!("{}{path}", h.url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        metadata["resource"],
+        format!("https://{host}/Microsoft-Server-ActiveSync")
+    );
+    assert_eq!(
+        metadata["authorization_servers"],
+        json!(["https://auth.example.com"])
+    );
 }

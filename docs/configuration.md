@@ -16,6 +16,7 @@ it at startup with an error naming the variable.
 | `TRUSTED_PROXIES` | empty | Comma separated addresses or CIDR ranges of reverse proxies (e.g. Traefik). Only from these peers are `X-Forwarded-For` and `X-Real-Ip` believed; the right-most untrusted hop is taken as the device address. With it empty, the TCP peer is the device address. |
 | `EAS_VERSIONS` | `14.0,14.1,16.0,16.1` | EAS versions offered to devices. Devices pick one when the account is added and keep it; set `14.0,14.1` to keep new accounts on 14.1. |
 | `PUBLIC_URL` | unset | The address devices reach Tolk at, e.g. `https://mail.example.com`, handed out by Autodiscover. `{domain}` stands for the domain of the address looked up, so `https://mail.{domain}` serves several mail domains. Unset: the host of each Autodiscover request (`Host`, or `X-Forwarded-Host` from a trusted proxy). Set it in production. |
+| `OAUTH_ISSUER` | unset | The OAuth authorization server that issues tokens for the JMAP server, e.g. `https://mail.example.com` (Stalwart's `issuer`), advertised to clients (RFC 9728): Tolk then serves `/.well-known/oauth-protected-resource/Microsoft-Server-ActiveSync` and adds a `Bearer` challenge after `Basic` to its 401 answers. Leave it unset for phones: a mail app that sees a Bearer challenge may try Microsoft's login instead of asking for a password. See OAuth below. |
 | `AUTH_CACHE_TTL_SECS` | `300` | How long a verified JMAP session is reused before credentials are checked against the server again. A 401 from the server drops the cached session at once. |
 | `TRAFFIC_DIR` | unset | Directory for raw EAS traffic captures. Unset disables capture entirely. |
 | `TRAFFIC_CAPTURE` | empty | Whose traffic is written: comma separated `user`, `user/deviceid` or `*`. Empty captures nothing even when `TRAFFIC_DIR` is set. |
@@ -145,16 +146,26 @@ minutes until it reconnects.
 - Tolk authenticates every JMAP request with the device's own
   credentials (HTTP Basic, app passwords work). It stores no passwords; the
   session cache keys on a salted hash.
-- OAuth: a device may send `Authorization: Bearer <access token>` instead,
-  with a token the JMAP server issued (Stalwart is an OAuth provider; its
-  metadata is at `/.well-known/oauth-authorization-server`). The token is
-  passed on to JMAP as it came, so it works wherever it works on JMAP, push
-  included. When it expires, requests get 401 and the device must bring a
-  new one. Mainstream phone mail apps only do OAuth for Exchange against
+- OAuth: Tolk passes bearer tokens through and has no OAuth settings of
+  its own. A device may send `Authorization: Bearer <access token>` instead
+  of Basic, with a token the JMAP server issued (Stalwart is an OAuth
+  provider; its metadata is at `/.well-known/oauth-authorization-server`).
+  The token goes to JMAP as it came, so it works wherever it works on JMAP,
+  push included; Tolk never stores it. When it expires, requests get 401
+  and the client must bring a new one. Stalwart limits a token's JMAP
+  session to its scopes, so request `urn:ietf:params:oauth:scope:mail`
+  (plus `:contacts` and `:calendars`); a token without a mail account gets
+  403. Mainstream phone mail apps only do OAuth for Exchange against
   Microsoft's own login service, so in practice this serves clients and
   tools that let you supply a token (`eas-client --token-file`); phones keep
-  using passwords or app passwords. Tolk only offers Basic in its
-  401 challenge, so Outlook is not sent looking for a Microsoft login.
+  using passwords or app passwords. By default Tolk only offers Basic in
+  its 401 challenge, so Outlook is not sent looking for a Microsoft login.
+  With `OAUTH_ISSUER` set, clients can discover the token issuer (RFC 9728):
+  the metadata names it and the scopes above, and the 401 adds
+  `Bearer resource_metadata="…"`. The metadata lives under `/.well-known/`,
+  so the reverse proxy must send
+  `/.well-known/oauth-protected-resource/` to Tolk, also on hosts where the
+  rest of `/.well-known/` goes to the JMAP server.
 - Every JMAP request carries the device address in `X-Forwarded-For`, so the
   JMAP server's rate limiting and fail2ban act on the phone instead of on
   Tolk. Configure the JMAP server to trust that header from the

@@ -32,17 +32,17 @@ impl Harness {
 
     /// With `traffic_dir`, the test user's traffic is captured there.
     pub async fn start_capturing(traffic_dir: Option<&std::path::Path>) -> Self {
-        Self::start_with(traffic_dir, None, Default::default(), None).await
+        Self::start_with(traffic_dir, None, Default::default(), None, None).await
     }
 
     /// On a copy of an existing state database (e.g. a restored backup).
     pub async fn start_on(db: &std::path::Path) -> Self {
-        Self::start_with(None, Some(db), Default::default(), None).await
+        Self::start_with(None, Some(db), Default::default(), None, None).await
     }
 
     /// With these limits.
     pub async fn start_tuned(tuning: tolk::config::Tuning) -> Self {
-        Self::start_with(None, None, tuning, None).await
+        Self::start_with(None, None, tuning, None, None).await
     }
 
     /// With a second server for the test user's mail domain
@@ -56,9 +56,22 @@ impl Harness {
             None,
             Default::default(),
             Some((domain, mapped.url.clone())),
+            None,
         )
         .await;
         (h, mapped)
+    }
+
+    /// Advertising this OAuth issuer (`OAUTH_ISSUER`).
+    pub async fn start_with_oauth(issuer: &str) -> Self {
+        Self::start_with(
+            None,
+            None,
+            Default::default(),
+            None,
+            Some(issuer.to_owned()),
+        )
+        .await
     }
 
     async fn start_with(
@@ -66,6 +79,7 @@ impl Harness {
         db: Option<&std::path::Path>,
         tuning: tolk::config::Tuning,
         mapped: Option<(String, String)>,
+        oauth_issuer: Option<String>,
     ) -> Self {
         // Warnings and errors show up in the output of failing tests.
         let _ = tracing_subscriber::fmt()
@@ -91,6 +105,7 @@ impl Harness {
             auth_cache_ttl: Duration::from_secs(300),
             trusted_proxies: Vec::new(),
             public_url: None,
+            oauth_issuer,
             eas_versions: tolk::config::SUPPORTED_EAS_VERSIONS
                 .iter()
                 .map(|v| (*v).to_owned())

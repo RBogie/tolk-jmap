@@ -34,6 +34,10 @@ pub struct Config {
     /// `https://mail.example.com`), handed out by Autodiscover. Unset: the
     /// host of each Autodiscover request.
     pub public_url: Option<String>,
+    /// The OAuth authorization server that issues tokens for the JMAP server
+    /// (`OAUTH_ISSUER`), advertised to clients (see [`crate::oauth`]); unset
+    /// advertises nothing.
+    pub oauth_issuer: Option<String>,
     /// EAS versions offered to devices (`EAS_VERSIONS`), oldest first.
     pub eas_versions: Vec<String>,
     pub tuning: Tuning,
@@ -215,6 +219,16 @@ impl Config {
                 "PUBLIC_URL must start with https://"
             );
         }
+        let oauth_issuer = std::env::var("OAUTH_ISSUER")
+            .ok()
+            .map(|url| url.trim().trim_end_matches('/').to_owned())
+            .filter(|url| !url.is_empty());
+        if let Some(url) = &oauth_issuer {
+            anyhow::ensure!(
+                url.starts_with("https://") || url.starts_with("http://"),
+                "OAUTH_ISSUER must start with https://"
+            );
+        }
         let eas_versions = match list("EAS_VERSIONS") {
             versions if versions.is_empty() => DEFAULT_EAS_VERSIONS
                 .iter()
@@ -257,6 +271,7 @@ impl Config {
             auth_cache_ttl,
             trusted_proxies,
             public_url,
+            oauth_issuer,
             eas_versions,
             tuning: Tuning::from_env()?,
             backup_dir,
