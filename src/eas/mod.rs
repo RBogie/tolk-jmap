@@ -276,7 +276,7 @@ pub async fn handle(
         device = query.device_id.as_deref().unwrap_or("-"),
         cmd = query.cmd.as_deref().unwrap_or(method.as_str()),
     );
-    let (response, body) = tracing::Instrument::instrument(
+    let (mut response, body) = tracing::Instrument::instrument(
         respond(
             &state,
             &method,
@@ -289,6 +289,11 @@ pub async fn handle(
         span,
     )
     .await;
+    if response.status == StatusCode::UNAUTHORIZED
+        && let Some(bearer) = crate::oauth::challenge(&state, peer, &headers)
+    {
+        response.headers.append(header::WWW_AUTHENTICATE, bearer);
+    }
 
     state.metrics.record_request(
         query.cmd.as_deref().unwrap_or(method.as_str()),
@@ -544,7 +549,16 @@ async fn execute(
     let cmd = query.cmd.as_deref().unwrap_or_default();
     limits::check_request(device_id, query.device_type.as_deref()).map_err(CommandError::bad)?;
     // State is keyed by JMAP account, not by the login form the device uses.
-    let user = &*jmap.user_key().map_err(CommandError::Backend)?;
+    // A session without a mail account (an OAuth token issued without the
+    // mail scope) has nothing to sync: refused, not a server error.
+    let Ok(user) = jmap.user_key() else {
+        tracing::warn!(
+            user = %creds.username,
+            "the JMAP session has no mail account; an OAuth token needs the mail scope"
+        );
+        return Ok(Outcome::Forbidden);
+    };
+    let user = &*user;
     // A token is no login name to remember.
     if !creds.bearer {
         state.store.adopt_login(&creds.username, user)?;

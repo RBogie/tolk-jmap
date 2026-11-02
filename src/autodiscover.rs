@@ -177,7 +177,7 @@ async fn forward(
 /// domain of the address being looked up (`https://mail.{domain}`).
 /// Without `PUBLIC_URL` the request's host is used; `X-Forwarded-Host`
 /// counts only when the request came `from_proxy` (a trusted one).
-fn eas_url(
+pub(crate) fn eas_url(
     public_url: Option<&str>,
     headers: &HeaderMap,
     from_proxy: bool,

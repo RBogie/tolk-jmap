@@ -6,6 +6,8 @@
 
 - `JMAP_SERVERS`: one Tolk in front of several JMAP servers, chosen by the
   mail domain of the login.
+- `OAUTH_ISSUER`: advertises where clients get an OAuth token (RFC 9728
+  protected resource metadata and a `Bearer` challenge). Off by default.
 
 ### Changed
 
@@ -16,6 +18,8 @@
 
 ### Fixed
 
+- An OAuth token whose JMAP session has no mail account (issued without the
+  mail scope) gets 403 instead of a server error.
 - The WBXML decoder no longer accepts a global token in place of the root
   element (found by fuzzing).
 

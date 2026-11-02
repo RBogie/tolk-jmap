@@ -32,6 +32,9 @@ pub const ACCOUNT: &str = "a1";
 pub const SHARED_ACCOUNT: &str = "a2";
 /// An OAuth access token the server accepts for the test user.
 pub const TOKEN: &str = "test-access-token";
+/// A valid token whose session has no accounts, like one issued without
+/// scopes.
+pub const SCOPELESS_TOKEN: &str = "test-token-without-scopes";
 pub const SHARED_OWNER: &str = "Owner Two";
 
 const TYPES: &[&str] = &[
@@ -389,7 +392,9 @@ fn authorized(headers: &HeaderMap) -> bool {
     let given = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    if given == Some(format!("Bearer {TOKEN}").as_str()) {
+    if given == Some(format!("Bearer {TOKEN}").as_str())
+        || given == Some(format!("Bearer {SCOPELESS_TOKEN}").as_str())
+    {
         return true;
     }
     [USER, ALIAS].iter().any(|login| {
@@ -406,6 +411,19 @@ async fn session(State(shared): State<Shared>, headers: HeaderMap) -> Response {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let url = &shared.url;
+    let scopeless = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        == Some(format!("Bearer {SCOPELESS_TOKEN}").as_str());
+    if scopeless {
+        return Json(json!({
+            "capabilities": { "urn:ietf:params:jmap:core": {} },
+            "accounts": {}, "primaryAccounts": {}, "username": USER,
+            "apiUrl": format!("{url}/api"), "downloadUrl": "", "uploadUrl": "",
+            "eventSourceUrl": "", "state": "s0",
+        }))
+        .into_response();
+    }
     let capabilities = json!({
         "urn:ietf:params:jmap:core": { "maxObjectsInGet": 500, "maxSizeUpload": 50_000_000 },
         "urn:ietf:params:jmap:mail": {},

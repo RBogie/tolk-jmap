@@ -5,7 +5,8 @@
 //! server through [`jmap`] with the device's own credentials ([`auth`]).
 //! [`store`] keeps what each device was sent, [`push`] relays the server's
 //! change notifications to waiting Pings, and [`limits`], [`metrics`],
-//! [`maintenance`] and [`traffic`] cover operations. [`client`] and
+//! [`maintenance`] and [`traffic`] cover operations; [`oauth`] advertises
+//! where clients get tokens. [`client`] and
 //! [`fixtures`] serve the test tools.
 
 use std::{
@@ -30,6 +31,7 @@ pub mod jmap;
 pub mod limits;
 pub mod maintenance;
 pub mod metrics;
+pub mod oauth;
 pub mod push;
 pub mod store;
 pub mod traffic;
@@ -44,6 +46,8 @@ pub struct AppState {
     pub trusted_proxies: Vec<config::Cidr>,
     /// See [`config::Config::public_url`].
     pub public_url: Option<String>,
+    /// See [`config::Config::oauth_issuer`].
+    pub oauth_issuer: Option<String>,
     /// Comma separated EAS versions offered (`MS-ASProtocolVersions`).
     pub eas_versions: String,
     pub device_locks: DeviceLocks,
@@ -73,6 +77,7 @@ pub async fn build_app(config: &config::Config) -> anyhow::Result<(Router, Arc<A
         .await?,
         trusted_proxies: config.trusted_proxies.clone(),
         public_url: config.public_url.clone(),
+        oauth_issuer: config.oauth_issuer.clone(),
         eas_versions: config.eas_versions.join(","),
         device_locks: Default::default(),
         logins: limits::LoginLimiter::new(
@@ -89,6 +94,7 @@ pub async fn build_app(config: &config::Config) -> anyhow::Result<(Router, Arc<A
         .route("/", get(|| async { "tolk\n" }))
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/readyz", get(ready))
+        .route(oauth::METADATA_PATH, get(oauth::metadata))
         .fallback(dispatch)
         .layer(DefaultBodyLimit::max(config.tuning.max_request_bytes))
         .with_state(state.clone());
