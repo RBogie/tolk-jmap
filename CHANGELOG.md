@@ -6,8 +6,9 @@
 
 - `JMAP_SERVERS`: one Tolk in front of several JMAP servers, chosen by the
   mail domain of the login.
-- `OAUTH_ISSUER`: advertises where clients get an OAuth token (RFC 9728
-  protected resource metadata and a `Bearer` challenge). Off by default.
+- `OAUTH_ISSUER` (experimental): advertises where clients get an OAuth token
+  (RFC 9728 protected resource metadata and a `Bearer` challenge). Off by
+  default; it may change or go away in any release.
 
 ### Changed
 

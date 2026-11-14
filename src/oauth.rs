@@ -1,4 +1,5 @@
-//! OAuth discovery (RFC 9728), only when `OAUTH_ISSUER` is set.
+//! OAuth discovery (RFC 9728), only when `OAUTH_ISSUER` is set. Experimental:
+//! no phone mail app is known to use it.
 //!
 //! Tolk takes bearer tokens the JMAP server issued and passes them on (see
 //! [`crate::auth`]); it is no OAuth server itself. With `OAUTH_ISSUER`, a

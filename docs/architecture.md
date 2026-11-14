@@ -29,8 +29,8 @@ mail.
 1. **Credentials** (`auth.rs`): HTTP Basic or an OAuth bearer token. Failed
    logins are counted per address and per user (`limits.rs`), and an
    address over the limit is refused before the JMAP server is asked.
-   Tokens are passed through; with `OAUTH_ISSUER`, `oauth.rs` tells clients
-   where to get one.
+   Tokens are passed through; with `OAUTH_ISSUER` (experimental), `oauth.rs`
+   tells clients where to get one.
 2. **JMAP session** (`jmap/mod.rs`, `JmapPool`): the credentials open a
    JMAP session, which also verifies them. Sessions are cached for
    `AUTH_CACHE_TTL_SECS` under a keyed hash of the password. With
