@@ -27,7 +27,8 @@ cargo deny --locked check   # cargo install cargo-deny
 `cargo test` needs no JMAP server: the integration tests drive the real
 router against an in-process fake (`tests/support/fake_jmap.rs`). To try a
 change against a real server, see [scenarios/README.md](scenarios/README.md).
-The [README](README.md#development) has a map of the code.
+[docs/architecture.md](docs/architecture.md) explains how Tolk works, and
+the [README](README.md#development) has a map of the code.
 
 ## Pull requests
 
