@@ -2,13 +2,14 @@
 
 ## Supported versions
 
-Security fixes go into the latest release. Before 1.0 there are no
-maintained older lines: upgrade to the newest version to get a fix.
+Only the latest major version is supported: security fixes go into a new
+release of it (0.x until 1.0). Older major versions get no fixes; upgrade to
+the newest release to get one.
 
 | Version | Supported |
 | --- | --- |
-| Latest 0.x release | Yes |
-| Older releases | No |
+| Latest major version (currently 0.x) | Yes |
+| Older major versions | No |
 
 ## Reporting a vulnerability
 

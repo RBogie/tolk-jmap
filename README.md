@@ -54,8 +54,8 @@ tested; reports are welcome, see [docs/testing-a-client.md](docs/testing-a-clien
 - EAS 14.0, 14.1, 16.0 and 16.1.
 - Logins with passwords or app passwords. OAuth bearer tokens issued by the
   JMAP server are passed through, for clients that can supply one (phone mail
-  apps only do OAuth with Microsoft's login service); `OAUTH_ISSUER` lets
-  such clients discover where to get one.
+  apps only do OAuth with Microsoft's login service); the experimental
+  `OAUTH_ISSUER` lets such clients discover where to get one.
 - Device management: list, block and wipe devices.
 - Operations: health and readiness endpoints, Prometheus metrics, JSON
   logs, daily state backups, login failure limits.
