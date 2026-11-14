@@ -133,6 +133,8 @@ cargo clippy --all-targets
 - `fuzz/` has cargo-fuzz targets (`cargo fuzz run --sanitizer none <target>`
   works on the stable toolchain).
 
+[docs/architecture.md](docs/architecture.md) explains how it fits together.
+
 [docs/ROADMAP.md](docs/ROADMAP.md) lists what is planned.
 
 ## License
