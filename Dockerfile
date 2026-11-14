@@ -10,7 +10,7 @@
 # the same file the image contains.
 #
 # Base image and tools are pinned by version and digest or checksum.
-FROM --platform=$BUILDPLATFORM rust:1.99.1-trixie@sha256:09027f873d45b8ecd1dc86f1fa13b7a62b875c961f017a0e331267b350430137 AS build
+FROM --platform=$BUILDPLATFORM rust:1.100.0-trixie@sha256:e19840879045c951c905d0eaa9887f3439c62000e429963371b376bac8d38c31 AS build
 ARG BUILDARCH
 ARG TARGETARCH
 ARG TARGETVARIANT
