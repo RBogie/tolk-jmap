@@ -32,7 +32,8 @@ updates:
     cooldown:
       default-days: 7
 
-  # The servers the integration tests run against (scripts/ci/servers).
+  # The servers the integration tests run against (scripts/ci/servers), in
+  # one pull request.
   - package-ecosystem: docker
     directories:
       - "/scripts/ci/servers/stalwart-1.0"
@@ -41,6 +42,10 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    groups:
+      ci-servers:
+        patterns:
+          - "*"
 
   # The 0.16 line stays on 0.16: newer majors are tested by the entry above.
   - package-ecosystem: docker
