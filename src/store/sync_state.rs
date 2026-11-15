@@ -198,6 +198,24 @@ impl Store {
         Ok(())
     }
 
+    /// Replaces the stored view only if it is still `old`; false when
+    /// something else saved one meanwhile.
+    pub fn replace_collection_view(
+        &self,
+        user: &str,
+        device_id: &str,
+        collection_id: &str,
+        old: &str,
+        new: &str,
+    ) -> anyhow::Result<bool> {
+        let replaced = self.conn.locked().execute(
+            "UPDATE collection_view SET view = ?5
+             WHERE user = ?1 AND device_id = ?2 AND collection_id = ?3 AND view = ?4",
+            params![user, device_id, collection_id, old, new],
+        )?;
+        Ok(replaced > 0)
+    }
+
     pub fn collection_sync_state(
         &self,
         user: &str,

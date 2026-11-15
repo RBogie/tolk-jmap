@@ -75,8 +75,9 @@ pub struct Request<'a> {
     pub version: u16,
     pub body: Option<Element>,
     pub store: &'a Store,
-    /// Whether refreshed collection views are saved. Ping only reads: it
-    /// runs without the device lock, so saving would race with a Sync.
+    /// Whether refreshed collection views are saved unconditionally. Ping
+    /// runs without the device lock, so it only replaces a stored view that
+    /// no Sync has changed since it was read.
     pub persist_views: bool,
     pub caps: crate::config::Caps,
     /// Attachments streamed into the response (see [`stream`]).

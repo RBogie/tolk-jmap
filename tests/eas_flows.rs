@@ -3411,3 +3411,122 @@ async fn oauth_discovery_is_advertised_only_when_configured() {
         json!(["https://auth.example.com"])
     );
 }
+
+/// Pings `watched` until the device's next request ends it after `wait`,
+/// changing the model with `during` after `change_after`; returns the JMAP
+/// methods called meanwhile.
+async fn ping_and_count(
+    h: &Harness,
+    device: &support::Device,
+    folders_key: &str,
+    watched: &[(&str, &str)],
+    change_after: Duration,
+    during: impl FnOnce(&mut support::fake_jmap::Model),
+    wait: Duration,
+) -> Vec<String> {
+    h.jmap.take_calls();
+    let (ping, _) = tokio::join!(device.ping(60, watched), async {
+        tokio::time::sleep(change_after).await;
+        h.jmap.change(during);
+        tokio::time::sleep(wait).await;
+        // Any request from the device ends its waiting Ping.
+        device.folder_sync_from(folders_key).await;
+    });
+    assert_eq!(ping.0, "1", "no changes for the device");
+    h.jmap.take_calls()
+}
+
+fn count(calls: &[String], method: &str) -> usize {
+    calls.iter().filter(|c| *c == method).count()
+}
+
+fn flag_sent_mail(m: &mut support::fake_jmap::Model) {
+    let id = m
+        .all("Email")
+        .into_iter()
+        .find(|e| e["mailboxIds"]["sent"] == true)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let flagged = m.get("Email", &id).unwrap()["keywords"]["$flagged"] == true;
+    m.patch(
+        "Email",
+        &id,
+        json!({ "keywords/$flagged": !flagged })
+            .as_object()
+            .unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn ping_keeps_what_it_caught_up_on() {
+    let h = Harness::start().await;
+    h.jmap.add_email("sent", "Sent earlier", "x");
+    let (device, folders) = h.ready_device("d1").await;
+    let inbox = folders.id("Inbox");
+    device.initial_sync(&inbox).await;
+    let watched = [(inbox.as_str(), "Email")];
+
+    // A change outside the watched folder: the Ping looks at it once.
+    h.jmap.change(flag_sent_mail);
+    let first = ping_and_count(
+        &h,
+        &device,
+        &folders.key,
+        &watched,
+        Duration::ZERO,
+        |_| {},
+        Duration::from_millis(300),
+    )
+    .await;
+    assert_eq!(count(&first, "Email/get"), 1, "{first:?}");
+
+    // The next Ping starts from where the last one got: nothing to fetch.
+    let second = ping_and_count(
+        &h,
+        &device,
+        &folders.key,
+        &watched,
+        Duration::ZERO,
+        |_| {},
+        Duration::from_millis(300),
+    )
+    .await;
+    assert_eq!(count(&second, "Email/get"), 0, "{second:?}");
+}
+
+#[tokio::test]
+async fn shared_folder_polls_leave_the_users_own_folders_alone() {
+    let h = Harness::start_tuned(caps(tolk::config::Caps {
+        shared_poll: Duration::from_millis(200),
+        ..Default::default()
+    }))
+    .await;
+    h.jmap.share(false);
+    h.jmap.add_email("sent", "Sent earlier", "x");
+    let (device, folders) = h.ready_device("d1").await;
+    let inbox = folders.id("Inbox");
+    let team_calendar = shared_folder(&folders, "13");
+    device.initial_sync(&inbox).await;
+    device.initial_sync(&team_calendar).await;
+    let watched = [
+        (inbox.as_str(), "Email"),
+        (team_calendar.as_str(), "Calendar"),
+    ];
+
+    // One push for mail, then about seven shared-folder polls: the inbox is
+    // checked at the start and after the push, not at every poll.
+    let calls = ping_and_count(
+        &h,
+        &device,
+        &folders.key,
+        &watched,
+        Duration::from_millis(300),
+        flag_sent_mail,
+        Duration::from_millis(1500),
+    )
+    .await;
+    assert!(count(&calls, "Email/changes") <= 2, "{calls:?}");
+    assert!(count(&calls, "CalendarEvent/changes") >= 4, "{calls:?}");
+}

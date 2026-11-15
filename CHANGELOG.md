@@ -19,6 +19,9 @@
 
 ### Fixed
 
+- A waiting Ping with a shared folder no longer re-checks the user's own
+  folders and folder list at every shared-folder poll, and keeps what it
+  caught up on, so later polls do not fetch the same changes again.
 - An OAuth token whose JMAP session has no mail account (issued without the
   mail scope) gets 403 instead of a server error.
 - The WBXML decoder no longer accepts a global token in place of the root

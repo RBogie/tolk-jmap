@@ -78,10 +78,12 @@ pub async fn current_items(
     source: &(impl Source + Sync),
 ) -> anyhow::Result<Vec<(String, u64)>> {
     let key = source.key();
-    let stored = req
+    let stored_json = req
         .store
-        .collection_view(req.user, req.device_id, collection_id)?
-        .and_then(|json| serde_json::from_str::<View>(&json).ok())
+        .collection_view(req.user, req.device_id, collection_id)?;
+    let stored = stored_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<View>(json).ok())
         .filter(|v| v.key == key);
     let caught_up = match stored {
         Some(view) => catch_up(source, view).await?,
@@ -99,13 +101,24 @@ pub async fn current_items(
         }
     };
     view.items.retain(|item| source.keeps(item));
-    if req.persist_views {
-        req.store.save_collection_view(
-            req.user,
-            req.device_id,
-            collection_id,
-            &serde_json::to_string(&view)?,
-        )?;
+    let json = serde_json::to_string(&view)?;
+    match (&stored_json, req.persist_views) {
+        (_, true) => {
+            req.store
+                .save_collection_view(req.user, req.device_id, collection_id, &json)?;
+        }
+        // Ping: only when no Sync saved a view since it was read, so the
+        // next poll does not catch up on the same changes again.
+        (Some(old), false) if *old != json => {
+            req.store.replace_collection_view(
+                req.user,
+                req.device_id,
+                collection_id,
+                old,
+                &json,
+            )?;
+        }
+        _ => {}
     }
     Ok(view.items.into_iter().map(|i| (i.id, i.version)).collect())
 }
