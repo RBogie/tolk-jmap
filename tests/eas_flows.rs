@@ -1986,6 +1986,19 @@ async fn oauth_tokens_work_like_passwords() {
 }
 
 #[tokio::test]
+async fn passwords_without_jmap_mail_access_are_refused() {
+    let h = Harness::start().await;
+    // An app password limited to IMAP and SMTP: the JMAP server accepts the
+    // login, but the session has no mail account.
+    let device = h.device("d1");
+    let reply = device
+        .send_as("FolderSync", None, support::fake_jmap::NO_JMAP_PASSWORD)
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert!(h.state.store.list_devices().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn failed_logins_block_guessing_but_not_working_passwords() {
     let h = Harness::start().await;
     let (device, folders) = h.ready_device("d1").await;

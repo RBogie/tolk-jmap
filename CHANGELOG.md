@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- The warning for a login without a JMAP mail account no longer blames
+  OAuth when the login was a password (for example an app password limited
+  to IMAP and SMTP).
+
 ## 0.2.0 (2026-11-15)
 
 ### Added
