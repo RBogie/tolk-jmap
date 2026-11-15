@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 (2026-11-15)
+
 ### Added
 
 - `JMAP_SERVERS`: one Tolk in front of several JMAP servers, chosen by the
@@ -26,6 +28,8 @@
   mail scope) gets 403 instead of a server error.
 - The WBXML decoder no longer accepts a global token in place of the root
   element (found by fuzzing).
+- Attachment names, and other MIME parameters continued on a new line after
+  `=`, are no longer lost (mail-parser 1.0.1).
 
 ## 0.1.0 (2026-10-31)
 
