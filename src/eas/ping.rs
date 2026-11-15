@@ -72,7 +72,13 @@ impl PingParams {
 
 pub async fn handle(req: &Request<'_>, jmap: &JmapClient, push: &PushHub) -> CommandResult {
     let started = Instant::now();
-    let response = respond(req, jmap, push).await?;
+    let mut waiting = Waiting {
+        started,
+        answered: false,
+    };
+    let response = respond(req, jmap, push).await;
+    waiting.answered = true;
+    let response = response?;
     // A device that keeps re-pinging (for example because it ignores an
     // answer) gets its answers held back instead of hammering us and JMAP.
     if started.elapsed() < QUICK_ANSWER
@@ -179,6 +185,9 @@ async fn respond(req: &Request<'_>, jmap: &JmapClient, push: &PushHub) -> Comman
             }
         }
         shared_due = false;
+        // Everything up to `seen` is checked now: a later shared-folder poll
+        // looks at the shared folders only, not again at what push reported.
+        changed_since = Some(seen);
         if !changed.is_empty() {
             tracing::debug!(folders = ?changed, "ping: changes");
             let folders = changed
@@ -213,6 +222,25 @@ async fn respond(req: &Request<'_>, jmap: &JmapClient, push: &PushHub) -> Comman
                     shared_due = true;
                 }
             }
+        }
+    }
+}
+
+/// Logs (at debug) a Ping the device gave up on before it was answered,
+/// with how long it stayed open: a phone that drops its connection gets no
+/// push until its next Ping. The request's span names the device.
+struct Waiting {
+    started: Instant,
+    answered: bool,
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        if !self.answered {
+            tracing::debug!(
+                seconds = self.started.elapsed().as_secs(),
+                "ping: the device closed the connection before the answer"
+            );
         }
     }
 }
