@@ -145,7 +145,9 @@ minutes until it reconnects.
 
 - Tolk authenticates every JMAP request with the device's own
   credentials (HTTP Basic, app passwords work). It stores no passwords; the
-  session cache keys on a salted hash.
+  session cache keys on a salted hash. An app password must allow JMAP: one
+  limited to IMAP and SMTP may still open a JMAP session, but without a
+  mail account, and gets 403.
 - OAuth: Tolk passes bearer tokens through and has no OAuth settings of
   its own. A device may send `Authorization: Bearer <access token>` instead
   of Basic, with a token the JMAP server issued (Stalwart is an OAuth

@@ -35,6 +35,9 @@ pub const TOKEN: &str = "test-access-token";
 /// A valid token whose session has no accounts, like one issued without
 /// scopes.
 pub const SCOPELESS_TOKEN: &str = "test-token-without-scopes";
+/// A password of the test user whose session has no accounts, like an app
+/// password limited to IMAP and SMTP.
+pub const NO_JMAP_PASSWORD: &str = "imap-only";
 pub const SHARED_OWNER: &str = "Owner Two";
 
 const TYPES: &[&str] = &[
@@ -388,7 +391,6 @@ impl FakeJmap {
 }
 
 fn authorized(headers: &HeaderMap) -> bool {
-    use base64::Engine;
     let given = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
@@ -397,13 +399,22 @@ fn authorized(headers: &HeaderMap) -> bool {
     {
         return true;
     }
-    [USER, ALIAS].iter().any(|login| {
-        let expected = format!(
-            "Basic {}",
-            base64::engine::general_purpose::STANDARD.encode(format!("{login}:{PASSWORD}"))
-        );
-        given == Some(expected.as_str())
-    })
+    [PASSWORD, NO_JMAP_PASSWORD]
+        .iter()
+        .any(|password| given == Some(basic(password).as_str()))
+        || given == Some(basic_as(ALIAS, PASSWORD).as_str())
+}
+
+fn basic(password: &str) -> String {
+    basic_as(USER, password)
+}
+
+fn basic_as(login: &str, password: &str) -> String {
+    use base64::Engine;
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!("{login}:{password}"))
+    )
 }
 
 async fn session(State(shared): State<Shared>, headers: HeaderMap) -> Response {
@@ -411,10 +422,11 @@ async fn session(State(shared): State<Shared>, headers: HeaderMap) -> Response {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let url = &shared.url;
-    let scopeless = headers
+    let given = headers
         .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        == Some(format!("Bearer {SCOPELESS_TOKEN}").as_str());
+        .and_then(|v| v.to_str().ok());
+    let scopeless = given == Some(format!("Bearer {SCOPELESS_TOKEN}").as_str())
+        || given == Some(basic(NO_JMAP_PASSWORD).as_str());
     if scopeless {
         return Json(json!({
             "capabilities": { "urn:ietf:params:jmap:core": {} },

@@ -93,7 +93,7 @@ captures: turn them into fixtures with `eas-sanitize` and review the
 | Sync status 12 or Ping status 7 | The folder list changed (a folder was added, renamed or deleted elsewhere); the device runs FolderSync and carries on. |
 | No push, only manual refresh | The phone's own setting (Gmail: "Tap to be notified" on the account); or the JMAP push stream is down (log: "push stream failed"), in which case folders are still checked every two minutes. |
 | New mail arrives late after an upgrade | The client backs off after the restart's errors; it recovers within minutes. |
-| HTTP 403 | The device is blocked or was wiped (`devices list`). |
+| HTTP 403 | The device is blocked or was wiped (`devices list`). With the log "the JMAP session has no mail account": the login has no JMAP mail access, e.g. an app password limited to IMAP and SMTP, or an OAuth token without the mail scope. |
 | HTTP 503 | The JMAP server or the database is unavailable (`/readyz` says which; the log has the details) or a concurrency limit was hit (`MAX_PINGS`, `MAX_COMMANDS`). |
 
 Logs carry the request id, user, device and command on every line

@@ -551,12 +551,21 @@ async fn execute(
     limits::check_request(device_id, query.device_type.as_deref()).map_err(CommandError::bad)?;
     // State is keyed by JMAP account, not by the login form the device uses.
     // A session without a mail account (an OAuth token issued without the
-    // mail scope) has nothing to sync: refused, not a server error.
+    // mail scope, or an app password without JMAP access) has nothing to
+    // sync: refused, not a server error.
     let Ok(user) = jmap.user_key() else {
-        tracing::warn!(
-            user = %creds.username,
-            "the JMAP session has no mail account; an OAuth token needs the mail scope"
-        );
+        if creds.bearer {
+            tracing::warn!(
+                user = %creds.username,
+                "the JMAP session has no mail account; an OAuth token needs the mail scope"
+            );
+        } else {
+            tracing::warn!(
+                user = %creds.username,
+                "the JMAP session has no mail account; the login has no JMAP mail access \
+                 (an app password limited to IMAP or SMTP?)"
+            );
+        }
         return Ok(Outcome::Forbidden);
     };
     let user = &*user;
