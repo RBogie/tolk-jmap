@@ -55,6 +55,11 @@ pub(super) trait Kind {
     fn is_patch(&self, _command: &Element) -> bool {
         false
     }
+    /// The version the device would be sent of `id` now, from what
+    /// [`Kind::prepare`] loaded; `None` when unknown (no conflict check).
+    fn current_version(&self, _id: &str) -> Option<u64> {
+        None
+    }
     /// Whether the collection may be changed (a shared one may be read-only).
     fn writable(&self) -> impl Future<Output = anyhow::Result<bool>> + Send {
         async { Ok(true) }
@@ -89,12 +94,19 @@ enum Pending {
 }
 
 /// Applies the device's commands to JMAP and to its snapshot.
+///
+/// A Change of an object the server changed since the device was last sent
+/// it is a conflict (MS-ASCMD 2.2.3.34): unless `client_wins` (the device's
+/// `<Conflict>0</Conflict>`), the device's change is discarded with status 7
+/// and the server's version goes to the device in the same response. A
+/// Delete always wins.
 pub(super) async fn apply(
     req: &Request<'_>,
     folder: &Folder,
     commands: &Element,
     kind: &mut (impl Kind + Send),
     snapshot: &mut super::sync::Snapshot,
+    client_wins: bool,
 ) -> Result<Applied, CommandError> {
     let mut applied = Applied {
         responses: Vec::new(),
@@ -169,6 +181,19 @@ pub(super) async fn apply(
         let is_change = command.tag == airsync::Change
             || (command.tag == airsync::Delete && kind.is_patch(command));
         if is_change {
+            if !client_wins
+                && let (Some(held), Some(now)) = (snapshot.get(&id), kind.current_version(&id))
+                && *held != now
+            {
+                tracing::info!(
+                    object = id,
+                    "device change conflicts with a server change; the server's version wins"
+                );
+                applied
+                    .responses
+                    .push(item_status(command.tag, &server_id, status::CONFLICT));
+                continue;
+            }
             match kind.patch(&id, command) {
                 Patch::Apply(entries) => {
                     // Several commands may change one object (occurrences of a series).

@@ -347,6 +347,15 @@ impl Kind for CalendarChanges<'_> {
         Patch::Apply(patch)
     }
 
+    fn current_version(&self, id: &str) -> Option<u64> {
+        let event = self.current(id)?;
+        Some(version_of(&jscalendar::to_eas(
+            event,
+            self.body,
+            self.req.own,
+        )))
+    }
+
     async fn writable(&self) -> anyhow::Result<bool> {
         if !self.jmap.is_shared() {
             return Ok(true);
