@@ -552,6 +552,7 @@ async fn sync_collection(
                         body: &body,
                         deletes_as_moves,
                         client_wins: options.conflict == Some(0),
+                        sync_key: key,
                     };
                     responses = ctx.apply(commands, &mut snapshot).await?;
                 }
@@ -569,6 +570,7 @@ async fn sync_collection(
                         &mut kind,
                         &mut snapshot,
                         options.conflict == Some(0),
+                        key,
                     )
                     .await?;
                     responses = applied.responses;
@@ -589,6 +591,7 @@ async fn sync_collection(
                         &mut kind,
                         &mut snapshot,
                         options.conflict == Some(0),
+                        key,
                     )
                     .await?;
                     responses = applied.responses;

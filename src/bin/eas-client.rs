@@ -18,6 +18,9 @@
 //!                                     fetches the event and sends all of it
 //!                                     back with these Calendar fields
 //!                                     replaced, as iOS edits an event
+//!   edit-contact <collection> <key> <server-id> <Field=value>...
+//!                                     the same for a contact (Contacts and
+//!                                     Contacts2 fields)
 //!   add-event <collection> <key> <subject> <start> <minutes> [attendee]
 //!                                     start as 20261105T090000Z; an attendee
 //!                                     makes it a meeting (invitations go out)
@@ -212,7 +215,7 @@ async fn run(
             );
             client.send("MeetingResponse", Some(body)).await
         }
-        "edit-event" => {
+        "edit-event" | "edit-contact" => {
             let (collection, key, server_id) =
                 (arg(0, "collection")?, arg(1, "key")?, arg(2, "server-id")?);
             let sync = |key: String, command: Element| {
@@ -246,18 +249,24 @@ async fn run(
                 .and_then(|f| f.find(airsync::ApplicationData))
                 .context("the event was not fetched")?
                 .clone();
-            let page = wbxml::cp::page(4).context("no Calendar code page")?;
+            let pages: &[u8] = if command == "edit-event" {
+                &[4]
+            } else {
+                &[1, 12]
+            };
             for field in args.iter().skip(3) {
                 let (name, value) = field.split_once('=').context("Field=value")?;
-                let (token, _) = page
-                    .tags
+                let tag = pages
                     .iter()
-                    .find(|(_, n)| *n == name)
-                    .with_context(|| format!("no calendar field {name}"))?;
-                let tag = wbxml::Tag {
-                    page: page.number,
-                    token: *token,
-                };
+                    .filter_map(|p| wbxml::cp::page(*p))
+                    .find_map(|page| {
+                        let (token, _) = page.tags.iter().find(|(_, n)| *n == name)?;
+                        Some(wbxml::Tag {
+                            page: page.number,
+                            token: *token,
+                        })
+                    })
+                    .with_context(|| format!("no field {name}"))?;
                 data.children
                     .retain(|n| !matches!(n, wbxml::Node::Element(e) if e.tag == tag));
                 data.push(text(tag, value));

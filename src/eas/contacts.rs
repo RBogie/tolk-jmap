@@ -223,6 +223,14 @@ impl Kind for ContactChanges<'_> {
         self.versions.get(id).copied()
     }
 
+    fn unsupported(&self, data: &Element) -> Vec<&'static str> {
+        jscontact::UNSUPPORTED
+            .iter()
+            .filter(|(tag, _)| data.child_text(*tag).is_some_and(|v| !v.trim().is_empty()))
+            .map(|(_, name)| *name)
+            .collect()
+    }
+
     async fn writable(&self) -> anyhow::Result<bool> {
         if !self.jmap.is_shared() {
             return Ok(true);
@@ -230,12 +238,27 @@ impl Kind for ContactChanges<'_> {
         self.jmap.address_book_writable(self.address_book).await
     }
 
+    /// A card in several address books is only taken out of this one by a
+    /// device Delete; the others keep it.
     async fn set(
         &self,
         create: Map<String, Value>,
-        update: Map<String, Value>,
+        mut update: Map<String, Value>,
         destroy: Vec<String>,
     ) -> anyhow::Result<SetResult> {
+        let (leave, destroy): (Vec<String>, Vec<String>) = destroy.into_iter().partition(|id| {
+            self.current
+                .iter()
+                .find(|c| c["id"] == id.as_str())
+                .and_then(|c| c["addressBookIds"].as_object())
+                .is_some_and(|books| books.iter().filter(|(_, v)| **v == true).count() > 1)
+        });
+        for id in leave {
+            update.insert(
+                id,
+                serde_json::json!({ format!("addressBookIds/{}", self.address_book): null }),
+            );
+        }
         self.jmap
             .set(
                 crate::jmap::CONTACT_CARD,

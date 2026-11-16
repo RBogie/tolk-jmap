@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- Contacts:
+  - Car, radio, assistant, company main and MMS phones, the assistant,
+    manager and children, the Yomi (phonetic) names and the office location
+    are kept instead of dropped. CustomerId, GovernmentId and AccountName
+    have no JSContact property: an Add or Change with one of them is now
+    refused (status 6) instead of stored without it, unless
+    `UNSUPPORTED_FIELDS=log` (store the rest and log the field names).
+  - Deleting a card that is in several address books only takes it out of
+    that folder's book.
+  - When the device moves an email or IM address to another slot, it keeps
+    its own entry (contexts, label).
+  - A name edit keeps how the full name is written where it can, and
+    otherwise follows the card's order and separators. An edited address
+    field keeps its place among the components.
+- A device reusing a ClientId in a later Sync gets a new object instead of
+  the one an earlier Add created (MS-ASCMD 2.2.3.28.2: a ClientId is only
+  unique within one Sync).
 - Conflicting changes (MS-ASCMD 2.2.3.34): a Change for a contact, event
   or message (read and flag state) that the server changed since the device
   last received it no longer overwrites the server's version. The device gets status 7 and the
