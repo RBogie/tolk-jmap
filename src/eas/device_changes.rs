@@ -60,6 +60,11 @@ pub(super) trait Kind {
     fn current_version(&self, _id: &str) -> Option<u64> {
         None
     }
+    /// The fields in the device's `ApplicationData` that have a value but no
+    /// place on the JMAP server (see `UNSUPPORTED_FIELDS`).
+    fn unsupported(&self, _data: &Element) -> Vec<&'static str> {
+        Vec::new()
+    }
     /// Whether the collection may be changed (a shared one may be read-only).
     fn writable(&self) -> impl Future<Output = anyhow::Result<bool>> + Send {
         async { Ok(true) }
@@ -107,6 +112,7 @@ pub(super) async fn apply(
     kind: &mut (impl Kind + Send),
     snapshot: &mut super::sync::Snapshot,
     client_wins: bool,
+    sync_key: u32,
 ) -> Result<Applied, CommandError> {
     let mut applied = Applied {
         responses: Vec::new(),
@@ -150,7 +156,7 @@ pub(super) async fn apply(
                 .child_text(airsync::ClientId)
                 .unwrap_or_default()
                 .to_owned();
-            if let Some((id, response)) = repeated_add(req, folder, &client_id)? {
+            if let Some((id, response)) = repeated_add(req, folder, &client_id, sync_key)? {
                 applied.responses.push(response);
                 applied.touched.push(id);
                 continue;
@@ -161,6 +167,12 @@ pub(super) async fn apply(
                     .push(add_status(&client_id, None, status::CONVERSION_ERROR));
                 continue;
             };
+            if refuse_unsupported(req, kind, data) {
+                applied
+                    .responses
+                    .push(add_status(&client_id, None, status::CONVERSION_ERROR));
+                continue;
+            }
             let key = format!("c{n}");
             create.insert(key.clone(), Value::Object(kind.create(data, &client_id)));
             pending.push(Pending::Add { client_id, key });
@@ -181,6 +193,16 @@ pub(super) async fn apply(
         let is_change = command.tag == airsync::Change
             || (command.tag == airsync::Delete && kind.is_patch(command));
         if is_change {
+            if let Some(data) = command.find(airsync::ApplicationData)
+                && refuse_unsupported(req, kind, data)
+            {
+                applied.responses.push(item_status(
+                    command.tag,
+                    &server_id,
+                    status::CONVERSION_ERROR,
+                ));
+                continue;
+            }
             if !client_wins
                 && let (Some(held), Some(now)) = (snapshot.get(&id), kind.current_version(&id))
                 && *held != now
@@ -241,7 +263,7 @@ pub(super) async fn apply(
                         .push(add_status(&client_id, None, status::SERVER_ERROR));
                     continue;
                 };
-                record_add(req, folder, &client_id, id)?;
+                record_add(req, folder, &client_id, id, sync_key)?;
                 let item = req.store.item_ids(req.user, folder.id, &[id])?[id];
                 applied.responses.push(add_status(
                     &client_id,
@@ -291,6 +313,22 @@ pub(super) async fn apply(
     Ok(applied)
 }
 
+/// Logs the fields of `data` the server cannot store; whether the command
+/// is refused for them (`UNSUPPORTED_FIELDS=reject`).
+fn refuse_unsupported(req: &Request, kind: &impl Kind, data: &Element) -> bool {
+    let fields = kind.unsupported(data);
+    if fields.is_empty() {
+        return false;
+    }
+    let reject = req.caps.unsupported_fields == crate::config::UnsupportedFields::Reject;
+    tracing::info!(
+        ?fields,
+        rejected = reject,
+        "device sent fields the JMAP server cannot store"
+    );
+    reject
+}
+
 /// The answer to a change in a read-only collection. The device is sent the
 /// server's version again: a changed object (or `patch`, an occurrence
 /// Delete) as a Change, a deleted one as an Add.
@@ -334,19 +372,22 @@ fn refuse(
 }
 
 /// The `<Responses>` entry for an Add this device already made with the same
-/// ClientId (it retried a Sync whose response got lost), and the object it
-/// created; `None` for a new Add.
+/// ClientId in a Sync with the same SyncKey (it retried a Sync whose response
+/// got lost), and the object it created; `None` for a new Add. A ClientId is
+/// only unique within one Sync (MS-ASCMD 2.2.3.28.2), so a later Sync may
+/// reuse it for a new object.
 pub(super) fn repeated_add(
     req: &Request,
     folder: &Folder,
     client_id: &str,
+    sync_key: u32,
 ) -> anyhow::Result<Option<(String, Element)>> {
     if client_id.is_empty() {
         return Ok(None);
     }
     let Some(id) = req
         .store
-        .client_add(req.user, req.device_id, folder.id, client_id)?
+        .client_add(req.user, req.device_id, folder.id, client_id, sync_key)?
     else {
         return Ok(None);
     };
@@ -362,12 +403,13 @@ pub(super) fn record_add(
     folder: &Folder,
     client_id: &str,
     id: &str,
+    sync_key: u32,
 ) -> anyhow::Result<()> {
     if client_id.is_empty() {
         return Ok(());
     }
     req.store
-        .record_client_add(req.user, req.device_id, folder.id, client_id, id)
+        .record_client_add(req.user, req.device_id, folder.id, client_id, id, sync_key)
 }
 
 pub(super) fn failure(error: &str) -> &'static str {

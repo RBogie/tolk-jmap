@@ -80,6 +80,8 @@ pub(super) struct ClientCommands<'a> {
     /// The device's `<Conflict>0</Conflict>`: its flag changes win over the
     /// server's (MS-ASCMD 2.2.3.34).
     pub(super) client_wins: bool,
+    /// The SyncKey of the request (see [`device_changes::repeated_add`]).
+    pub(super) sync_key: u32,
 }
 
 /// A device change that was sent to JMAP and awaits its result.
@@ -301,7 +303,7 @@ impl ClientCommands<'_> {
         snapshot: &mut Snapshot,
     ) -> Result<Element, CommandError> {
         if let Some((id, response)) =
-            device_changes::repeated_add(self.req, self.folder, client_id)?
+            device_changes::repeated_add(self.req, self.folder, client_id, self.sync_key)?
         {
             // A retried send: the draft goes out now, or went out before.
             if drafts::wants_send(data)
@@ -336,7 +338,7 @@ impl ClientCommands<'_> {
             }
         };
         let id = saved.id.clone();
-        device_changes::record_add(self.req, self.folder, client_id, &id)?;
+        device_changes::record_add(self.req, self.folder, client_id, &id, self.sync_key)?;
         let item = self
             .req
             .store

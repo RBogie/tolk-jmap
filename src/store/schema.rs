@@ -8,7 +8,7 @@ use super::*;
 /// upgrade cleanly.
 pub(super) const MIGRATIONS: &[&str] = &[
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
-    SCHEMA_V9,
+    SCHEMA_V9, SCHEMA_V10,
 ];
 
 pub(super) const SCHEMA_V1: &str = r#"
@@ -186,6 +186,13 @@ pub(super) const SCHEMA_V9: &str = r#"
 -- submission is known to have gone out (done). Rows from before were sent.
 ALTER TABLE sent_client_ids ADD COLUMN email_id TEXT;
 ALTER TABLE sent_client_ids ADD COLUMN done INTEGER NOT NULL DEFAULT 1;
+"#;
+
+pub(super) const SCHEMA_V10: &str = r#"
+-- The SyncKey of the request an Add came in: a ClientId only identifies an
+-- object within one Sync (MS-ASCMD 2.2.3.28.2), so only a retry of that
+-- Sync is answered from here.
+ALTER TABLE client_adds ADD COLUMN sync_key INTEGER;
 "#;
 
 /// Brings the schema to the latest version, backing the database up first

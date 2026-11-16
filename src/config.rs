@@ -88,6 +88,20 @@ pub struct Caps {
     /// How often a waiting Ping or Sync re-checks folders in shared accounts
     /// (`SHARED_POLL_SECS`, 120): Stalwart pushes no changes for them.
     pub shared_poll: Duration,
+    /// What a device Add or Change carrying fields Tolk cannot store
+    /// (`UNSUPPORTED_FIELDS`, `reject`): EAS has no way to tell the device.
+    pub unsupported_fields: UnsupportedFields,
+}
+
+/// See [`Caps::unsupported_fields`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnsupportedFields {
+    /// Store the rest and log the fields that were left out.
+    Log,
+    /// Refuse the whole Add or Change (status 6), so nothing is lost
+    /// without the device knowing.
+    #[default]
+    Reject,
 }
 
 impl Default for Caps {
@@ -97,6 +111,7 @@ impl Default for Caps {
             contact_picture_max_bytes: 48 * 1024,
             search_max_results: 100,
             shared_poll: Duration::from_secs(120),
+            unsupported_fields: UnsupportedFields::Reject,
         }
     }
 }
@@ -118,6 +133,11 @@ impl Caps {
             shared_poll: Duration::from_secs(
                 number("SHARED_POLL_SECS", d.shared_poll.as_secs() as usize)?.max(5) as u64,
             ),
+            unsupported_fields: match env_or("UNSUPPORTED_FIELDS", "reject").trim() {
+                "log" => UnsupportedFields::Log,
+                "reject" => UnsupportedFields::Reject,
+                other => anyhow::bail!("UNSUPPORTED_FIELDS must be log or reject, not {other:?}"),
+            },
         })
     }
 }

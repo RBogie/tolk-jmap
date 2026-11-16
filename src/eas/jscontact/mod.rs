@@ -17,6 +17,14 @@ use crate::wbxml::{
     cp::{airsync, airsyncbase, contacts as c, contacts2 as c2},
 };
 
+/// EAS contact fields JSContact has no property for (and Stalwart refuses
+/// vendor properties); see `UNSUPPORTED_FIELDS`.
+pub const UNSUPPORTED: [(Tag, &str); 3] = [
+    (c2::CustomerId, "CustomerId"),
+    (c2::GovernmentId, "GovernmentId"),
+    (c2::AccountName, "AccountName"),
+];
+
 /// Card properties this mapping writes.
 pub const MANAGED: &[&str] = &[
     "name",
@@ -69,7 +77,7 @@ const ADDRESS_FIELDS: [(&str, [Tag; 5]); 3] = [
     ),
 ];
 
-const PHONE_SLOTS: [Tag; 8] = [
+const PHONE_SLOTS: [Tag; 13] = [
     c::MobilePhoneNumber,
     c::HomePhoneNumber,
     c::Home2PhoneNumber,
@@ -78,11 +86,50 @@ const PHONE_SLOTS: [Tag; 8] = [
     c::BusinessFaxNumber,
     c::HomeFaxNumber,
     c::PagerNumber,
+    c::CarPhoneNumber,
+    c::RadioPhoneNumber,
+    c::AssistantPhoneNumber,
+    c2::CompanyMainPhone,
+    c2::MMS,
+];
+
+/// Phone slots JSContact has no feature for, told apart by `label`.
+const LABELED_PHONES: [(Tag, &str); 4] = [
+    (c::CarPhoneNumber, "car"),
+    (c::RadioPhoneNumber, "radio"),
+    (c::AssistantPhoneNumber, "assistant"),
+    (c2::MMS, "mms"),
 ];
 
 /// JSContact address component kinds matching the EAS fields above (the
 /// street is assembled from `number` and `name`).
 const ADDRESS_KINDS: [&str; 4] = ["locality", "region", "postcode", "country"];
+
+/// EAS fields holding one related person's name, and the `relatedTo`
+/// relation they show. `manager` is not an RFC 9553 relation type, but
+/// none fits and Stalwart keeps it.
+const RELATED: [(Tag, &str); 3] = [
+    (c::Spouse, "spouse"),
+    (c::AssistantName, "agent"),
+    (c2::ManagerName, "manager"),
+];
+
+/// The name of the first person with `relation`, in key order.
+fn related_name<'a>(card: &'a Value, relation: &str) -> Option<&'a str> {
+    keyed(&card["relatedTo"])
+        .into_iter()
+        .find(|(_, v)| v["relation"][relation] == true)
+        .map(|(name, _)| name.as_str())
+}
+
+/// The names of the children, in key order.
+fn children(card: &Value) -> Vec<&str> {
+    keyed(&card["relatedTo"])
+        .into_iter()
+        .filter(|(_, v)| v["relation"]["child"] == true)
+        .map(|(name, _)| name.as_str())
+        .collect()
+}
 
 /// EAS name fields and the JSContact name component kinds they show.
 const NAME_PARTS: [(Tag, &str); 5] = [
@@ -93,8 +140,25 @@ const NAME_PARTS: [(Tag, &str); 5] = [
     (c::Suffix, "generation"),
 ];
 
-/// The phone a device sends in an EAS slot: its features and context.
+/// The EAS field with the pronunciation of a name component kind.
+fn yomi(kind: &str) -> Option<Tag> {
+    match kind {
+        "given" => Some(c::YomiFirstName),
+        "surname" => Some(c::YomiLastName),
+        _ => None,
+    }
+}
+
+/// The phone a device sends in an EAS slot: its features and context, and
+/// for the slots JSContact has no feature for, a label.
 fn phone_entry(tag: Tag, number: &str) -> Value {
+    if let Some((_, label)) = LABELED_PHONES.iter().find(|(t, _)| *t == tag) {
+        let feature = if tag == c2::MMS { "text" } else { "voice" };
+        return json!({ "number": number, "features": { feature: true }, "label": label });
+    }
+    if tag == c2::CompanyMainPhone {
+        return json!({ "number": number, "features": { "main-number": true }, "contexts": { "work": true } });
+    }
     let (feature, context) = match tag {
         t if t == c::MobilePhoneNumber => ("mobile", None),
         t if t == c::HomePhoneNumber || t == c::Home2PhoneNumber => ("voice", Some("private")),
@@ -157,7 +221,16 @@ fn phone_slots(card: &Value) -> Vec<(Tag, &str)> {
         }
         let feature = |f: &str| phone["features"][f] == true;
         let work = phone["contexts"]["work"] == true;
-        let candidates: &[Tag] = if feature("mobile") {
+        let label = phone["label"].as_str().map(str::to_ascii_lowercase);
+        let labeled = LABELED_PHONES
+            .iter()
+            .find(|(_, l)| label.as_deref() == Some(*l))
+            .map(|(t, _)| std::slice::from_ref(t));
+        let candidates: &[Tag] = if let Some(tags) = labeled {
+            tags
+        } else if feature("main-number") {
+            &[c2::CompanyMainPhone]
+        } else if feature("mobile") {
             &[c::MobilePhoneNumber]
         } else if feature("pager") {
             &[c::PagerNumber]
@@ -229,6 +302,27 @@ fn address_field(address: &Value, field: usize) -> String {
     }
 }
 
+/// The office (EAS OfficeLocation) of a work address: its room.
+fn office(address: &Value) -> String {
+    entries_array(&address["components"])
+        .filter(|c| c["kind"] == "room")
+        .filter_map(|c| c["value"].as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Sets or clears the room of an address, first among its components.
+fn set_office(address: &mut Value, office: Option<&str>) {
+    let mut components: Vec<Value> = entries_array(&address["components"])
+        .filter(|c| c["kind"] != "room")
+        .cloned()
+        .collect();
+    if let Some(office) = office {
+        components.insert(0, json!({ "kind": "room", "value": office }));
+    }
+    address["components"] = components.into();
+}
+
 /// The card's `ApplicationData` for the device; a photo larger than
 /// `max_picture` bytes is left out (`CONTACT_PICTURE_MAX_KB`).
 pub fn to_eas(card: &Value, max_picture: usize) -> Element {
@@ -262,6 +356,14 @@ pub fn to_eas(card: &Value, max_picture: usize) -> Element {
             .or_else(|| component("credential"))
             .as_deref(),
     );
+    // How the first and last name are pronounced (Japanese yomi).
+    let phonetic = |kind: &str| {
+        entries_array(&card["name"]["components"])
+            .find(|c| c["kind"] == kind)
+            .and_then(|c| c["phonetic"].as_str())
+    };
+    put(c::YomiFirstName, phonetic("given"));
+    put(c::YomiLastName, phonetic("surname"));
     let file_as = card["name"]["full"]
         .as_str()
         .map(str::to_owned)
@@ -275,6 +377,10 @@ pub fn to_eas(card: &Value, max_picture: usize) -> Element {
     let organization = entries(&card["organizations"]).next();
     let company = organization.and_then(|o| o["name"].as_str());
     put(c::CompanyName, company);
+    put(
+        c::YomiCompanyName,
+        organization.and_then(|o| o["sortAs"].as_str()),
+    );
     put(
         c::Department,
         organization
@@ -302,12 +408,15 @@ pub fn to_eas(card: &Value, max_picture: usize) -> Element {
         put(tag, card["phones"][key]["number"].as_str());
     }
 
-    // One address per kind
+    // One address per kind; the office is the work address's room.
     for (kind, key) in address_slots(card) {
         let address = &card["addresses"][key];
         let tags = ADDRESS_FIELDS.iter().find(|(k, _)| *k == kind).unwrap().1;
         for (field, tag) in tags.into_iter().enumerate() {
             put(tag, Some(&address_field(address, field)));
+        }
+        if kind == "work" {
+            put(c::OfficeLocation, Some(&office(address)));
         }
     }
 
@@ -325,13 +434,18 @@ pub fn to_eas(card: &Value, max_picture: usize) -> Element {
         c::WebPage,
         entries(&card["links"]).find_map(|l| l["uri"].as_str()),
     );
-    put(
-        c::Spouse,
-        card["relatedTo"]
-            .as_object()
-            .and_then(|r| r.iter().find(|(_, v)| v["relation"]["spouse"] == true))
-            .map(|(name, _)| name.as_str()),
-    );
+    for (tag, relation) in RELATED {
+        put(tag, related_name(card, relation));
+    }
+    let kids = children(card);
+    if !kids.is_empty() {
+        data.push(
+            kids.into_iter()
+                .fold(Element::new(c::Children), |list, name| {
+                    list.child(Element::with_text(c::Child, name))
+                }),
+        );
+    }
 
     let categories: Vec<&String> = card["keywords"]
         .as_object()
@@ -479,7 +593,11 @@ pub fn from_eas(data: &Element) -> Map<String, Value> {
     let mut components = Vec::new();
     for (tag, kind) in NAME_PARTS {
         if let Some(value) = text(tag) {
-            components.push(json!({ "kind": kind, "value": value }));
+            let mut component = json!({ "kind": kind, "value": value });
+            if let Some(phonetic) = yomi(kind).and_then(&text) {
+                component["phonetic"] = phonetic.into();
+            }
+            components.push(component);
         }
     }
     if !components.is_empty() {
@@ -490,6 +608,9 @@ pub fn from_eas(data: &Element) -> Map<String, Value> {
         let mut org = Map::new();
         if let Some(name) = text(c::CompanyName) {
             org.insert("name".to_owned(), name.into());
+        }
+        if let Some(yomi) = text(c::YomiCompanyName) {
+            org.insert("sortAs".to_owned(), yomi.into());
         }
         if let Some(unit) = text(c::Department) {
             org.insert("units".to_owned(), json!([{ "name": unit }]));
@@ -520,12 +641,27 @@ pub fn from_eas(data: &Element) -> Map<String, Value> {
     );
     insert_nonempty(&mut card, "phones", phones);
 
-    let addresses = id_map(
+    let mut addresses = id_map(
         "a",
         ADDRESS_FIELDS
             .iter()
             .filter_map(|(kind, tags)| address_entry(kind, tags.map(text))),
     );
+    if let Some(office) = text(c::OfficeLocation) {
+        let work = addresses
+            .values_mut()
+            .find(|a| a["contexts"]["work"] == true);
+        match work {
+            Some(address) => set_office(address, Some(office)),
+            None => {
+                let key = format!("a{}", addresses.len() + 1);
+                addresses.insert(
+                    key,
+                    json!({ "contexts": { "work": true }, "components": [{ "kind": "room", "value": office }] }),
+                );
+            }
+        }
+    }
     insert_nonempty(&mut card, "addresses", addresses);
 
     let anniversaries = id_map(
@@ -541,12 +677,16 @@ pub fn from_eas(data: &Element) -> Map<String, Value> {
     if let Some(uri) = text(c::WebPage) {
         card.insert("links".to_owned(), json!({ "l1": { "uri": uri } }));
     }
-    if let Some(spouse) = text(c::Spouse) {
-        card.insert(
-            "relatedTo".to_owned(),
-            json!({ spouse: { "relation": { "spouse": true } } }),
-        );
+    let mut related = Map::new();
+    for (tag, relation) in RELATED {
+        if let Some(name) = text(tag) {
+            add_relation(&mut related, name, relation);
+        }
     }
+    for name in child_names(data) {
+        add_relation(&mut related, &name, "child");
+    }
+    insert_nonempty(&mut card, "relatedTo", related);
     if let Some(categories) = data.find(c::Categories) {
         let keywords: Map<String, Value> = categories
             .find_all(c::Category)
@@ -582,6 +722,24 @@ pub fn from_eas(data: &Element) -> Map<String, Value> {
         card.insert("notes".to_owned(), json!({ "n1": { "note": note } }));
     }
     card
+}
+
+/// Adds `relation` to the `relatedTo` entry of `name`.
+fn add_relation(related: &mut Map<String, Value>, name: &str, relation: &str) {
+    let entry = related
+        .entry(name.to_owned())
+        .or_insert_with(|| json!({ "relation": {} }));
+    entry["relation"][relation] = true.into();
+}
+
+/// The names in a device's `<Children>`, in order, without empty ones.
+fn child_names(data: &Element) -> Vec<String> {
+    data.find(c::Children)
+        .into_iter()
+        .flat_map(|c| c.find_all(c::Child))
+        .filter_map(|c| c.text().map(str::trim).filter(|t| !t.is_empty()))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Numbered ids (`p1`, `p2`, ...) for the values of a JSContact map.
@@ -789,5 +947,62 @@ mod tests {
                 prop_assert_eq!(back.child_text(c::Email1Address), email.as_deref());
             }
         }
+    }
+
+    pub(super) fn extras() -> Value {
+        json!({
+            "name": { "components": [
+                { "kind": "given", "value": "Kenji", "phonetic": "けんじ" },
+                { "kind": "surname", "value": "Sato", "phonetic": "さとう" },
+            ]},
+            "organizations": { "o": { "name": "Acme", "sortAs": "アクメ" } },
+            "phones": {
+                "c": { "number": "+31 20 1", "label": "car" },
+                "r": { "number": "+31 20 2", "label": "radio" },
+                "a": { "number": "+31 20 3", "label": "assistant" },
+                "m": { "number": "+31 20 4", "features": { "main-number": true }, "contexts": { "work": true } },
+                "s": { "number": "+31 6 9", "features": { "text": true }, "label": "mms" },
+            },
+            "relatedTo": {
+                "Mary": { "relation": { "spouse": true } },
+                "Anna": { "relation": { "agent": true } },
+                "Bob": { "relation": { "manager": true } },
+                "Tom": { "relation": { "child": true } },
+                "Kim": { "relation": { "child": true } },
+            },
+            "addresses": { "w": { "contexts": { "work": true }, "components": [
+                { "kind": "room", "value": "Building 4" },
+                { "kind": "name", "value": "Main St 1" },
+            ]}},
+        })
+    }
+
+    #[test]
+    fn maps_the_fields_beyond_the_basics() {
+        let data = to_eas(&extras(), usize::MAX);
+        let field = |tag| data.child_text(tag);
+        assert_eq!(field(c::CarPhoneNumber), Some("+31 20 1"));
+        assert_eq!(field(c::RadioPhoneNumber), Some("+31 20 2"));
+        assert_eq!(field(c::AssistantPhoneNumber), Some("+31 20 3"));
+        assert_eq!(field(c2::CompanyMainPhone), Some("+31 20 4"));
+        assert_eq!(field(c2::MMS), Some("+31 6 9"));
+        assert_eq!(field(c::AssistantName), Some("Anna"));
+        assert_eq!(field(c2::ManagerName), Some("Bob"));
+        assert_eq!(field(c::YomiFirstName), Some("けんじ"));
+        assert_eq!(field(c::YomiLastName), Some("さとう"));
+        assert_eq!(field(c::YomiCompanyName), Some("アクメ"));
+        assert_eq!(field(c::OfficeLocation), Some("Building 4"));
+        assert_eq!(field(c::BusinessAddressStreet), Some("Main St 1"));
+        let kids: Vec<&str> = data
+            .find(c::Children)
+            .unwrap()
+            .find_all(c::Child)
+            .filter_map(|c| c.text())
+            .collect();
+        assert_eq!(kids, ["Kim", "Tom"]);
+
+        // And back: the same fields again.
+        let back = Value::Object(from_eas(&data));
+        assert_eq!(to_eas(&back, usize::MAX), data);
     }
 }

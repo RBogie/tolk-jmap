@@ -16,9 +16,9 @@ use std::collections::BTreeSet;
 use serde_json::{Map, Value, json};
 
 use super::{
-    ADDRESS_FIELDS, ADDRESS_KINDS, NAME_PARTS, PHONE_SLOTS, address_entry, address_field,
-    address_slots, bare_address, eas_date, email_entry, email_slots, entries_array, keyed,
-    partial_date, phone_entry, phone_slots, to_eas,
+    ADDRESS_FIELDS, ADDRESS_KINDS, NAME_PARTS, PHONE_SLOTS, RELATED, address_entry, address_field,
+    address_slots, bare_address, child_names, children, eas_date, email_entry, email_slots,
+    entries_array, keyed, partial_date, phone_entry, phone_slots, related_name, to_eas, yomi,
 };
 use crate::wbxml::{
     Element, Tag,
@@ -56,6 +56,7 @@ pub fn merge(
     emails(&ctx, &mut patch);
     phones(&ctx, &mut patch);
     addresses(&ctx, &mut patch);
+    office_location(&ctx, &mut patch);
     for (tag, kind) in [(c::Birthday, "birth"), (c::Anniversary, "wedding")] {
         let first = |card: &Value| first_key(card, "anniversaries", |a| a["kind"] == kind);
         slot(
@@ -93,7 +94,7 @@ pub fn merge(
         |e, v| e["name"] = v.into(),
     );
     online_services(&ctx, &mut patch);
-    spouse(&ctx, &mut patch);
+    related(&ctx, &mut patch);
     keywords(&ctx, &mut patch);
     let first_photo = |card: &Value| first_key(card, "media", |m| m["kind"] == "photo");
     slot(
@@ -279,7 +280,11 @@ fn name(ctx: &Ctx, patch: &mut Map<String, Value>) {
         .iter()
         .filter_map(|(tag, kind)| Some((*kind, ctx.change(*tag)?)))
         .collect();
-    if changes.is_empty() {
+    let pronunciations: Vec<(&str, Option<String>)> = ["given", "surname"]
+        .into_iter()
+        .filter_map(|kind| Some((kind, ctx.change(yomi(kind)?)?)))
+        .collect();
+    if changes.is_empty() && pronunciations.is_empty() {
         return;
     }
     const ORDER: [&str; 6] = [
@@ -297,6 +302,7 @@ fn name(ctx: &Ctx, patch: &mut Map<String, Value>) {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let before = components.clone();
     for (kind, value) in changes {
         let has = |k: &str| components.iter().any(|c| c["kind"] == k);
         // The suffix shows `generation`, or `credential` when there is none.
@@ -329,14 +335,23 @@ fn name(ctx: &Ctx, patch: &mut Map<String, Value>) {
             (None, None) => {}
         }
     }
+    for (kind, value) in pronunciations {
+        let Some(component) = components.iter_mut().find(|c| c["kind"] == kind) else {
+            continue;
+        };
+        match value {
+            Some(value) => component["phonetic"] = value.into(),
+            None => {
+                if let Some(component) = component.as_object_mut() {
+                    component.remove("phonetic");
+                }
+            }
+        }
+    }
     // A full name would now be out of date.
-    if name.contains_key("full") {
-        let full = components
-            .iter()
-            .filter(|c| c["kind"] != "separator")
-            .filter_map(|c| c["value"].as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
+    if let Some(old) = name.get("full").and_then(Value::as_str) {
+        let full = edited_full(old, &before, &components)
+            .unwrap_or_else(|| joined_full(&name, &components, &rank));
         if full.is_empty() {
             name.remove("full");
         } else {
@@ -356,10 +371,100 @@ fn name(ctx: &Ctx, patch: &mut Map<String, Value>) {
     patch.insert("name".to_owned(), value);
 }
 
+/// `full` with only the changed components replaced, when each old value
+/// appears in it once; `None` otherwise (a component was added, or `full`
+/// is written differently).
+fn edited_full(full: &str, before: &[Value], after: &[Value]) -> Option<String> {
+    let value = |c: &Value| c["value"].as_str().unwrap_or_default().to_owned();
+    let mut full = full.to_owned();
+    let mut kinds: Vec<&str> = Vec::new();
+    for kind in before
+        .iter()
+        .chain(after)
+        .filter_map(|c| c["kind"].as_str())
+    {
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    for kind in kinds.into_iter().filter(|k| *k != "separator") {
+        let old: Vec<String> = before
+            .iter()
+            .filter(|c| c["kind"] == kind)
+            .map(value)
+            .collect();
+        let new: Vec<String> = after
+            .iter()
+            .filter(|c| c["kind"] == kind)
+            .map(value)
+            .collect();
+        if old == new {
+            continue;
+        }
+        let ([old], new) = (old.as_slice(), new.as_slice()) else {
+            return None;
+        };
+        if old.is_empty() || full.matches(old.as_str()).count() != 1 {
+            return None;
+        }
+        full = match new {
+            [new] => full.replacen(old.as_str(), new, 1),
+            [] => full
+                .replacen(old.as_str(), "", 1)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => return None,
+        };
+    }
+    Some(full.trim().to_owned())
+}
+
+/// A full name made from the components: in their order when `isOrdered`,
+/// otherwise in the usual one, with the card's separators.
+fn joined_full(
+    name: &Map<String, Value>,
+    components: &[Value],
+    rank: &dyn Fn(Option<&str>) -> Option<usize>,
+) -> String {
+    let separator = name
+        .get("defaultSeparator")
+        .and_then(Value::as_str)
+        .unwrap_or(" ");
+    let mut parts: Vec<&Value> = components.iter().collect();
+    if name.get("isOrdered") != Some(&Value::Bool(true)) {
+        parts.retain(|c| c["kind"] != "separator");
+        parts.sort_by_key(|c| rank(c["kind"].as_str()).unwrap_or(usize::MAX));
+    }
+    let mut full = String::new();
+    let mut pending_separator = false;
+    for part in parts {
+        let text = part["value"].as_str().unwrap_or_default();
+        if part["kind"] == "separator" {
+            full.push_str(text);
+            pending_separator = false;
+            continue;
+        }
+        if text.is_empty() {
+            continue;
+        }
+        if pending_separator {
+            full.push_str(separator);
+        }
+        full.push_str(text);
+        pending_separator = true;
+    }
+    full.trim().to_owned()
+}
+
 /// Company and department: the first organization and its first unit.
 fn organization(ctx: &Ctx, patch: &mut Map<String, Value>) {
-    let (company, department) = (ctx.change(c::CompanyName), ctx.change(c::Department));
-    if company.is_none() && department.is_none() {
+    let (company, department, yomi_company) = (
+        ctx.change(c::CompanyName),
+        ctx.change(c::Department),
+        ctx.change(c::YomiCompanyName),
+    );
+    if company.is_none() && department.is_none() && yomi_company.is_none() {
         return;
     }
     let key = first_key(ctx.current, "organizations", |_| true);
@@ -376,6 +481,15 @@ fn organization(ctx: &Ctx, patch: &mut Map<String, Value>) {
             }
             Some(None) => {
                 org.remove("name");
+            }
+            None => {}
+        }
+        match yomi_company {
+            Some(Some(yomi)) => {
+                org.insert("sortAs".to_owned(), yomi.into());
+            }
+            Some(None) => {
+                org.remove("sortAs");
             }
             None => {}
         }
@@ -407,34 +521,78 @@ fn organization(ctx: &Ctx, patch: &mut Map<String, Value>) {
     });
 }
 
+/// The three email slots. Entries are matched by address, so when the
+/// device removes Email1 and moves the others up, each address keeps its
+/// own entry (contexts, label) and only the preference follows the slots.
 fn emails(ctx: &Ctx, patch: &mut Map<String, Value>) {
     let tags = [c::Email1Address, c::Email2Address, c::Email3Address];
     let changes: Vec<_> = tags.iter().map(|t| ctx.change(*t)).collect();
     if changes.iter().all(Option::is_none) {
         return;
     }
-    let keys = email_slots(ctx.current);
+    let wanted: Vec<Option<String>> = tags
+        .iter()
+        .zip(changes)
+        .map(|(tag, change)| change.unwrap_or_else(|| ctx.shown(*tag)))
+        .collect();
+    let same = |e: &Value, address: &str| {
+        e["address"]
+            .as_str()
+            .is_some_and(|a| a.eq_ignore_ascii_case(address))
+    };
+    let keys: Vec<String> = email_slots(ctx.current)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     // Among emails without a preference, a new one with one would go first.
     let ranked = keyed(&ctx.current["emails"])
         .iter()
         .all(|(_, e)| e["pref"].is_u64());
+    let reordered = keys.len() != wanted.iter().flatten().count()
+        || keys
+            .iter()
+            .zip(wanted.iter().flatten())
+            .any(|(key, address)| !same(&ctx.current["emails"][key], address));
     edit(ctx, patch, "emails", |map| {
-        for (i, change) in changes.into_iter().enumerate() {
-            let Some(value) = change else { continue };
-            put_slot(
-                map,
-                "e",
-                keys.get(i).copied(),
-                value.as_deref(),
-                |e, v| e["address"] = v.into(),
-                |v| {
-                    let mut email = email_entry(i, v);
-                    if !ranked && let Some(email) = email.as_object_mut() {
-                        email.remove("pref");
-                    }
-                    email
-                },
-            );
+        // Slot entries whose address the device no longer has; a new address
+        // in the same slot takes its entry over (an edited address).
+        let gone: Vec<(usize, String)> = keys
+            .iter()
+            .enumerate()
+            .filter(|(_, key)| {
+                map.get(*key)
+                    .is_none_or(|e| !wanted.iter().flatten().any(|a| same(e, a)))
+            })
+            .map(|(i, key)| (i, key.clone()))
+            .collect();
+        let mut reused = Vec::new();
+        for (i, address) in wanted.iter().enumerate() {
+            let Some(address) = address else { continue };
+            if let Some(entry) = map.values_mut().find(|e| same(e, address)) {
+                if ranked && reordered {
+                    entry["pref"] = (i + 1).into();
+                }
+                continue;
+            }
+            if let Some((_, key)) = gone.iter().find(|(slot, _)| *slot == i)
+                && let Some(entry) = map.get_mut(key)
+            {
+                entry["address"] = address.as_str().into();
+                if ranked && reordered {
+                    entry["pref"] = (i + 1).into();
+                }
+                reused.push(key.clone());
+                continue;
+            }
+            let mut email = email_entry(i, address);
+            if !ranked && let Some(email) = email.as_object_mut() {
+                email.remove("pref");
+            }
+            let key = fresh_key(map, "e");
+            map.insert(key, email);
+        }
+        for (_, key) in gone.iter().filter(|(_, k)| !reused.contains(k)) {
+            map.remove(key);
         }
     });
 }
@@ -494,10 +652,19 @@ fn addresses(ctx: &Ctx, patch: &mut Map<String, Value>) {
                 continue;
             };
             let current = &ctx.current["addresses"][key];
-            let remains = (0..5).any(|field| match &changes[field] {
-                Some(value) => value.is_some(),
-                None => !address_field(current, field).is_empty(),
+            // Parts EAS shows elsewhere (the office) or not at all keep it.
+            let shown_kinds = ["name", "number", "separator"];
+            let other_parts = entries_array(&current["components"]).any(|c| {
+                !shown_kinds
+                    .iter()
+                    .chain(&ADDRESS_KINDS)
+                    .any(|k| c["kind"] == *k)
             });
+            let remains = other_parts
+                || (0..5).any(|field| match &changes[field] {
+                    Some(value) => value.is_some(),
+                    None => !address_field(current, field).is_empty(),
+                });
             if !remains {
                 map.remove(key);
                 continue;
@@ -525,9 +692,17 @@ fn addresses(ctx: &Ctx, patch: &mut Map<String, Value>) {
             let kinds = std::iter::once(&street_kinds[..]).chain(ADDRESS_KINDS.chunks(1));
             for (change, kinds) in changes.into_iter().zip(kinds) {
                 let Some(value) = change else { continue };
+                // Replaced where it was, so the order stays.
+                let at = components
+                    .iter()
+                    .position(|c| kinds.iter().any(|k| c["kind"] == *k))
+                    .unwrap_or(components.len());
                 components.retain(|c| !kinds.iter().any(|k| c["kind"] == *k));
                 if let Some(value) = value {
-                    components.push(json!({ "kind": kinds[0], "value": value }));
+                    components.insert(
+                        at.min(components.len()),
+                        json!({ "kind": kinds[0], "value": value }),
+                    );
                 }
             }
             address.insert("components".to_owned(), components.into());
@@ -535,53 +710,169 @@ fn addresses(ctx: &Ctx, patch: &mut Map<String, Value>) {
     });
 }
 
-/// IM addresses: the first three services, in id order.
+/// The office is the room of the work address (made when there is none).
+fn office_location(ctx: &Ctx, patch: &mut Map<String, Value>) {
+    let Some(value) = ctx.change(c::OfficeLocation) else {
+        return;
+    };
+    let shown = address_slots(ctx.current)
+        .into_iter()
+        .find(|(kind, _)| *kind == "work")
+        .map(|(_, key)| key.to_owned());
+    edit(ctx, patch, "addresses", |map| {
+        let key = shown.filter(|k| map.contains_key(k)).or_else(|| {
+            map.iter()
+                .find(|(_, a)| a["contexts"]["work"] == true)
+                .map(|(k, _)| k.clone())
+        });
+        match key {
+            Some(key) => {
+                let Some(address) = map.get_mut(&key) else {
+                    return;
+                };
+                super::set_office(address, value.as_deref());
+                let empty = entries_array(&address["components"]).next().is_none();
+                if empty && !address["full"].is_string() {
+                    map.remove(&key);
+                }
+            }
+            None => {
+                if let Some(office) = value {
+                    let key = fresh_key(map, "a");
+                    map.insert(
+                        key,
+                        json!({ "contexts": { "work": true }, "components": [{ "kind": "room", "value": office }] }),
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// IM addresses: the first three services, in id order, matched by
+/// address like the emails.
 fn online_services(ctx: &Ctx, patch: &mut Map<String, Value>) {
     let tags = [c2::IMAddress, c2::IMAddress2, c2::IMAddress3];
     let changes: Vec<_> = tags.iter().map(|t| ctx.change(*t)).collect();
     if changes.iter().all(Option::is_none) {
         return;
     }
+    let wanted: Vec<String> = tags
+        .iter()
+        .zip(changes)
+        .filter_map(|(tag, change)| change.unwrap_or_else(|| ctx.shown(*tag)))
+        .collect();
+    let user = |e: &Value| e["user"].as_str().or(e["uri"].as_str()).map(str::to_owned);
     let keys: Vec<String> = keyed(&ctx.current["onlineServices"])
         .into_iter()
         .take(3)
         .map(|(k, _)| k.clone())
         .collect();
     edit(ctx, patch, "onlineServices", |map| {
-        for (i, change) in changes.into_iter().enumerate() {
-            let Some(value) = change else { continue };
-            put_slot(
-                map,
-                "im",
-                keys.get(i).map(String::as_str),
-                value.as_deref(),
-                |e, v| {
-                    e["user"] = v.into();
-                    if let Some(e) = e.as_object_mut() {
-                        e.remove("uri");
-                    }
-                },
-                |v| json!({ "user": v }),
-            );
+        let mut gone: Vec<String> = keys
+            .iter()
+            .filter(|key| {
+                map.get(*key)
+                    .and_then(user)
+                    .is_none_or(|u| !wanted.contains(&u))
+            })
+            .cloned()
+            .collect();
+        for address in &wanted {
+            if map
+                .values()
+                .any(|e| user(e).as_deref() == Some(address.as_str()))
+            {
+                continue;
+            }
+            // An edited address keeps its entry.
+            if !gone.is_empty()
+                && let Some(entry) = map.get_mut(&gone.remove(0))
+            {
+                entry["user"] = address.as_str().into();
+                if let Some(entry) = entry.as_object_mut() {
+                    entry.remove("uri");
+                }
+                continue;
+            }
+            let key = fresh_key(map, "im");
+            map.insert(key, json!({ "user": address }));
+        }
+        for key in gone {
+            map.remove(&key);
         }
     });
 }
 
-/// The spouse is a `relatedTo` entry keyed by the name.
-fn spouse(ctx: &Ctx, patch: &mut Map<String, Value>) {
-    let Some(value) = ctx.change(c::Spouse) else {
+/// Spouse, assistant, manager and children are `relatedTo` entries keyed by
+/// the name. A person keeps their entry, and other relations on it, when
+/// only one relation changes.
+fn related(ctx: &Ctx, patch: &mut Map<String, Value>) {
+    for (tag, relation) in RELATED {
+        let Some(value) = ctx.change(tag) else {
+            continue;
+        };
+        let old = related_name(ctx.current, relation).map(str::to_owned);
+        edit(ctx, patch, "relatedTo", |map| {
+            set_relation(map, old.as_deref(), value.as_deref(), relation);
+        });
+    }
+    if !ctx.manages(c::Children) {
         return;
-    };
-    let key = first_key(ctx.current, "relatedTo", |r| {
-        r["relation"]["spouse"] == true
-    });
+    }
+    let device = child_names(ctx.data);
+    let shown: Vec<String> = children(ctx.current)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    if device == shown {
+        return;
+    }
     edit(ctx, patch, "relatedTo", |map| {
-        let old = key.and_then(|k| map.remove(&k));
-        if let Some(name) = value {
-            let entry = old.unwrap_or_else(|| json!({ "relation": { "spouse": true } }));
-            map.insert(name, entry);
+        for name in shown.iter().filter(|n| !device.contains(n)) {
+            set_relation(map, Some(name), None, "child");
+        }
+        for name in device.iter().filter(|n| !shown.contains(n)) {
+            set_relation(map, None, Some(name), "child");
         }
     });
+}
+
+/// Moves `relation` from the person `old` to `new` (either may be absent):
+/// an entry left without relations goes, one that gains it is made.
+fn set_relation(
+    map: &mut Map<String, Value>,
+    old: Option<&str>,
+    new: Option<&str>,
+    relation: &str,
+) {
+    if old == new {
+        return;
+    }
+    if let Some(old) = old
+        && let Some(entry) = map.get_mut(old)
+    {
+        if let Some(relations) = entry["relation"].as_object_mut() {
+            relations.remove(relation);
+        }
+        if entry["relation"].as_object().is_none_or(|r| r.is_empty()) {
+            // Moved to the new name: it keeps the entry's other properties.
+            let entry = map.remove(old);
+            if let (Some(new), Some(mut entry)) = (new, entry)
+                && !map.contains_key(new)
+            {
+                entry["relation"] = json!({ relation: true });
+                map.insert(new.to_owned(), entry);
+                return;
+            }
+        }
+    }
+    if let Some(new) = new {
+        let entry = map
+            .entry(new.to_owned())
+            .or_insert_with(|| json!({ "relation": {} }));
+        entry["relation"][relation] = true.into();
+    }
 }
 
 fn keywords(ctx: &Ctx, patch: &mut Map<String, Value>) {
@@ -835,6 +1126,75 @@ mod tests {
         assert_eq!(after["notes"], card["notes"]);
         assert_eq!(after["media"], card["media"]);
         assert_eq!(after["addresses"]["y"]["full"], "Billing Way 4");
+    }
+
+    #[test]
+    fn renumbered_emails_keep_their_entries() {
+        let card = card();
+        // Email1 removed on the phone: the others move up a slot.
+        let data = device(&card, |d| {
+            set(d, c::Email1Address, "ann@work.example");
+            set(d, c::Email2Address, "ann@third.example");
+            remove(d, c::Email3Address);
+        });
+        let after = apply(&card, merge(&card, &data, None, usize::MAX));
+        assert!(after["emails"].get("a").is_none(), "removed");
+        assert_eq!(after["emails"]["b"]["address"], "ann@work.example");
+        assert_eq!(after["emails"]["b"]["pref"], 1);
+        assert_eq!(after["emails"]["c"]["pref"], 2);
+        assert_eq!(after["emails"]["d"]["address"], "ann@fourth.example");
+    }
+
+    #[test]
+    fn a_name_edit_keeps_how_full_is_written() {
+        let mut card = card();
+        card["name"]["full"] = "Lee, Ann".into();
+        let data = device(&card, |d| set(d, c::FirstName, "Anne"));
+        let after = apply(&card, merge(&card, &data, None, usize::MAX));
+        assert_eq!(after["name"]["full"], "Lee, Anne");
+
+        // A component that was not there: rebuilt in the usual order.
+        let data = device(&card, |d| set(d, c::MiddleName, "M."));
+        let after = apply(&card, merge(&card, &data, None, usize::MAX));
+        assert_eq!(after["name"]["full"], "Ann M. Lee");
+    }
+
+    #[test]
+    fn related_people_and_office_merge() {
+        let card = super::super::tests::extras();
+        let data = device(&card, |d| {
+            remove(d, c::Children);
+            d.push(
+                Element::new(c::Children)
+                    .child(Element::with_text(c::Child, "Tom"))
+                    .child(Element::with_text(c::Child, "Lisa")),
+            );
+            set(d, c2::ManagerName, "Carol");
+            set(d, c::OfficeLocation, "Building 5");
+            set(d, c::YomiFirstName, "ケンジ");
+        });
+        let after = apply(&card, merge(&card, &data, None, usize::MAX));
+        let related = &after["relatedTo"];
+        assert!(related.get("Kim").is_none(), "child removed");
+        assert_eq!(related["Tom"]["relation"]["child"], true);
+        assert_eq!(related["Lisa"]["relation"]["child"], true);
+        assert!(related.get("Bob").is_none());
+        assert_eq!(related["Carol"]["relation"]["manager"], true);
+        assert_eq!(related["Mary"]["relation"]["spouse"], true);
+        let work = &after["addresses"]["w"]["components"];
+        assert_eq!(work[0], json!({ "kind": "room", "value": "Building 5" }));
+        assert_eq!(work[1]["value"], "Main St 1");
+        assert_eq!(after["name"]["components"][0]["phonetic"], "ケンジ");
+    }
+
+    #[test]
+    fn an_edited_address_field_stays_in_place() {
+        let card = card();
+        let data = device(&card, |d| set(d, c::HomeAddressStreet, "Side Street 2"));
+        let after = apply(&card, merge(&card, &data, None, usize::MAX));
+        let home = after["addresses"]["h"]["components"].as_array().unwrap();
+        assert_eq!(home[0]["value"], "Side Street 2");
+        assert_eq!(home.last().unwrap()["kind"], "locality");
     }
 
     #[test]

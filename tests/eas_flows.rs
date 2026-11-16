@@ -1410,6 +1410,96 @@ async fn retried_add_creates_the_contact_once() {
 }
 
 #[tokio::test]
+async fn a_client_id_reused_in_a_later_sync_adds_a_new_contact() {
+    let h = Harness::start().await;
+    let (device, folders) = h.ready_device("d1").await;
+    let contacts = folders.id("Contacts");
+    let initial = device.initial_sync(&contacts).await;
+    // ClientIds only identify an object within one Sync (MS-ASCMD
+    // 2.2.3.28.2); a device counting from 1 again reuses them.
+    let add = |name: &str| {
+        Element::new(airsync::Commands).child(
+            Element::new(airsync::Add)
+                .child(text(airsync::ClientId, "1"))
+                .child(Element::new(airsync::ApplicationData).child(text(ct::FirstName, name))),
+        )
+    };
+    let first = device
+        .sync(&contacts, &initial.key, Some(add("Grace")))
+        .await;
+    let second = device.sync(&contacts, &first.key, Some(add("Ada"))).await;
+    assert_ne!(
+        first.responses[0].3, second.responses[0].3,
+        "a new ServerId"
+    );
+    h.jmap.read(|m| assert_eq!(m.all("ContactCard").len(), 2));
+}
+
+#[tokio::test]
+async fn contact_fields_without_a_place_are_logged_or_refused() {
+    let add = |client_id: &str| {
+        Element::new(airsync::Commands).child(
+            Element::new(airsync::Add)
+                .child(text(airsync::ClientId, client_id))
+                .child(
+                    Element::new(airsync::ApplicationData)
+                        .child(text(ct::FirstName, "Grace"))
+                        .child(text(tolk::wbxml::cp::contacts2::CustomerId, "C-1")),
+                ),
+        )
+    };
+    // Default: refused with status 6, nothing stored.
+    let h = Harness::start().await;
+    let (device, folders) = h.ready_device("d1").await;
+    let contacts = folders.id("Contacts");
+    let initial = device.initial_sync(&contacts).await;
+    let refused = device.sync(&contacts, &initial.key, Some(add("1"))).await;
+    assert_eq!(refused.responses[0].2, "6");
+    h.jmap.read(|m| assert!(m.all("ContactCard").is_empty()));
+
+    // UNSUPPORTED_FIELDS=log: the rest is stored.
+    let mut tuning = tolk::config::Tuning::default();
+    tuning.caps.unsupported_fields = tolk::config::UnsupportedFields::Log;
+    let h = Harness::start_tuned(tuning).await;
+    let (device, folders) = h.ready_device("d1").await;
+    let contacts = folders.id("Contacts");
+    let initial = device.initial_sync(&contacts).await;
+    let stored = device.sync(&contacts, &initial.key, Some(add("1"))).await;
+    assert_eq!(stored.responses[0].2, "1");
+    h.jmap.read(|m| assert_eq!(m.all("ContactCard").len(), 1));
+}
+
+#[tokio::test]
+async fn deleting_a_shared_card_removes_it_from_one_address_book() {
+    let h = Harness::start().await;
+    let id = h.jmap.change(|m| {
+        m.insert(
+            "ContactCard",
+            json!({
+                "@type": "Card",
+                "version": "1.0",
+                "addressBookIds": { "ab1": true, "ab2": true },
+                "name": { "components": [{ "kind": "given", "value": "Ada" }] },
+            }),
+        )
+    });
+    let (device, folders) = h.ready_device("d1").await;
+    let contacts = folders.id("Contacts");
+    let initial = device.initial_sync(&contacts).await;
+    let server_id = initial.add_ids()[0].clone();
+    let delete = Element::new(airsync::Commands)
+        .child(Element::new(airsync::Delete).child(text(airsync::ServerId, server_id)));
+    let result = device.sync(&contacts, &initial.key, Some(delete)).await;
+    assert!(result.responses.is_empty(), "{:?}", result.responses);
+    h.jmap.read(|m| {
+        let card = m.get("ContactCard", &id).expect("kept for the other book");
+        assert_eq!(card["addressBookIds"], json!({ "ab2": true }));
+    });
+    let after = device.sync(&contacts, &result.key, None).await;
+    assert!(after.adds.is_empty(), "not sent back to this folder");
+}
+
+#[tokio::test]
 async fn retried_add_creates_the_event_once() {
     let h = Harness::start().await;
     let (device, folders) = h.ready_device("d1").await;

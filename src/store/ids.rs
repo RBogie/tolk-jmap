@@ -228,14 +228,16 @@ impl Store {
         device_id: &str,
         folder_id: u32,
         client_id: &str,
+        sync_key: u32,
     ) -> anyhow::Result<Option<String>> {
         Ok(self
             .conn
             .locked()
             .query_row(
                 "SELECT object_id FROM client_adds
-                 WHERE user = ?1 AND device_id = ?2 AND folder_id = ?3 AND client_id = ?4",
-                params![user, device_id, folder_id, client_id],
+                 WHERE user = ?1 AND device_id = ?2 AND folder_id = ?3 AND client_id = ?4
+                   AND sync_key = ?5",
+                params![user, device_id, folder_id, client_id, sync_key],
                 |row| row.get(0),
             )
             .optional()?)
@@ -248,12 +250,21 @@ impl Store {
         folder_id: u32,
         client_id: &str,
         object_id: &str,
+        sync_key: u32,
     ) -> anyhow::Result<()> {
         self.conn.locked().execute(
             "INSERT OR REPLACE INTO client_adds
-                 (user, device_id, folder_id, client_id, object_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![user, device_id, folder_id, client_id, object_id, unix_now()],
+                 (user, device_id, folder_id, client_id, object_id, created_at, sync_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                user,
+                device_id,
+                folder_id,
+                client_id,
+                object_id,
+                unix_now(),
+                sync_key
+            ],
         )?;
         Ok(())
     }
