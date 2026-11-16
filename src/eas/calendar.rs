@@ -211,6 +211,8 @@ pub(super) struct CalendarChanges<'a> {
     pub jmap: &'a JmapClient,
     pub calendar: &'a str,
     pub body: &'a BodyPreference,
+    /// The fields the device manages (`<Supported>`), if it said.
+    supported: Option<&'a [String]>,
     /// The events being changed: meetings keep their participants'
     /// responses, and occurrences are found in their series.
     current: Vec<Value>,
@@ -224,12 +226,14 @@ impl<'a> CalendarChanges<'a> {
         jmap: &'a JmapClient,
         calendar: &'a str,
         body: &'a BodyPreference,
+        supported: Option<&'a [String]>,
     ) -> Self {
         Self {
             req,
             jmap,
             calendar,
             body,
+            supported,
             current: Vec::new(),
             scheduling: false,
         }
@@ -300,24 +304,46 @@ impl Kind for CalendarChanges<'_> {
                 return Patch::NotFound;
             };
             let has_participants = event["participants"].is_object();
+            let has_overrides = event["recurrenceOverrides"].is_object();
             let Some((recurrence_id, entry)) =
                 jscalendar::occurrence_override(event, instance, data)
             else {
                 return Patch::NotFound;
             };
+            // What the device left out of the occurrence stays as it was.
+            let entry = match (&event["recurrenceOverrides"][&recurrence_id], entry) {
+                (Value::Object(old), Value::Object(new)) if new.get("excluded").is_none() => {
+                    let mut merged = old.clone();
+                    merged.extend(new);
+                    Value::Object(merged)
+                }
+                (_, entry) => entry,
+            };
             self.scheduling |= has_participants;
             let mut patch = Map::new();
-            patch.insert(format!("recurrenceOverrides/{recurrence_id}"), entry);
+            // A patch path needs an existing object.
+            if has_overrides {
+                patch.insert(format!("recurrenceOverrides/{recurrence_id}"), entry);
+            } else {
+                patch.insert(
+                    "recurrenceOverrides".to_owned(),
+                    serde_json::json!({ recurrence_id: entry }),
+                );
+            }
             return Patch::Apply(patch);
         }
         let Some(data) = data else {
             return Patch::Skip;
         };
-        let mut patch = jscalendar::from_eas(data);
-        let existing = self
-            .current(id)
-            .map_or(Value::Null, |e| e["participants"].clone());
-        self.organize(&mut patch, data, &existing);
+        let current = self.current(id).cloned().unwrap_or(Value::Null);
+        let mut patch = jscalendar::change_from_eas(
+            &current,
+            data,
+            self.req.version,
+            self.supported,
+            self.req.email,
+        );
+        self.organize(&mut patch, data, &current["participants"]);
         Patch::Apply(patch)
     }
 

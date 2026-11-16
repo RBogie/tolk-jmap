@@ -20,7 +20,7 @@ use super::{
     tz,
 };
 use crate::wbxml::{
-    Element,
+    Element, Tag,
     cp::{airsync, airsyncbase, calendar as cal},
 };
 
@@ -841,6 +841,106 @@ pub fn from_eas(data: &Element) -> Map<String, Value> {
     event
 }
 
+/// The EAS fields each [`MANAGED`] property is made from.
+const SOURCES: &[(&str, &[Tag])] = &[
+    ("title", &[cal::Subject]),
+    ("description", &[airsyncbase::Body]),
+    ("locations", &[cal::Location]),
+    ("start", TIMING),
+    ("duration", TIMING),
+    ("timeZone", TIMING),
+    ("showWithoutTime", &[cal::AllDayEvent]),
+    ("alerts", &[cal::Reminder]),
+    ("freeBusyStatus", &[cal::BusyStatus]),
+    ("privacy", &[cal::Sensitivity]),
+    ("keywords", &[cal::Categories]),
+    ("recurrenceRule", &[cal::Recurrence]),
+    ("recurrenceRules", &[cal::Recurrence]),
+];
+
+const TIMING: &[Tag] = &[
+    cal::StartTime,
+    cal::EndTime,
+    cal::AllDayEvent,
+    cal::TimeZone,
+];
+
+/// The patch for a device's Change of the event `current`, following
+/// MS-ASCMD 2.2.3.24 on what a field the device left out means:
+///
+/// - `Body` and `Exceptions` left out stay unchanged; so does a single
+///   occurrence left out of `Exceptions`.
+/// - EAS 16: every calendar field left out stays unchanged.
+/// - EAS 14: a field left out is cleared, unless the device sent
+///   `<Supported>` without it (ghosting).
+///
+/// Unchanged fields are left out of the patch. The ones that are written are
+/// computed with the event's current values filled in for the fields the
+/// device left out, so a new end time keeps the event's time zone.
+pub fn change_from_eas(
+    current: &Value,
+    data: &Element,
+    version: u16,
+    supported: Option<&[String]>,
+    own_email: &str,
+) -> Map<String, Value> {
+    let sent = |tag: Tag| data.find(tag).is_some();
+    let managed = |tag: Tag| {
+        sent(tag)
+            || (version < 160
+                && tag != airsyncbase::Body
+                && supported.is_none_or(|s| s.contains(&tag.to_string())))
+    };
+    let whole = BodyPreference {
+        body_type: body_type::PLAIN,
+        truncation_size: None,
+        all_or_none: false,
+        preview: None,
+    };
+    let mut merged = data.clone();
+    for element in to_eas(current, &whole, own_email).elements() {
+        if !managed(element.tag) && element.tag != cal::Exceptions {
+            merged.push(element.clone());
+        }
+    }
+    let mut event = from_eas(&merged);
+    let mut patch: Map<String, Value> = SOURCES
+        .iter()
+        .filter(|(_, tags)| tags.iter().any(|t| managed(*t)))
+        .filter_map(|(key, _)| Some(((*key).to_owned(), event.remove(*key)?)))
+        .collect();
+    // A series that became a single event keeps no occurrences.
+    if patch.get("recurrenceRule").is_some_and(Value::is_null)
+        && current["recurrenceOverrides"].is_object()
+    {
+        patch.insert("recurrenceOverrides".to_owned(), Value::Null);
+        return patch;
+    }
+    // The occurrences the device sent, each merged into what it was. A patch
+    // path needs an existing object, so a first one writes them whole.
+    if let Some(Value::Object(overrides)) = event.remove("recurrenceOverrides")
+        && sent(cal::Exceptions)
+    {
+        if !current["recurrenceOverrides"].is_object() {
+            patch.insert("recurrenceOverrides".to_owned(), Value::Object(overrides));
+            return patch;
+        }
+        for (key, entry) in overrides {
+            let entry = match (&current["recurrenceOverrides"][&key], entry) {
+                (Value::Object(old), Value::Object(new)) if new.get("excluded").is_none() => {
+                    let mut merged = old.clone();
+                    merged.remove("excluded");
+                    merged.extend(new);
+                    Value::Object(merged)
+                }
+                (_, entry) => entry,
+            };
+            patch.insert(format!("recurrenceOverrides/{key}"), entry);
+        }
+    }
+    patch
+}
+
 /// An EAS `<Recurrence>` as a JSCalendar recurrence rule.
 fn recurrence_from_eas(recurrence: &Element, tz: Option<Tz>) -> Option<Value> {
     let number = |tag| {
@@ -1560,5 +1660,138 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn series() -> Value {
+        json!({
+            "uid": "u1",
+            "title": "Review",
+            "description": "Bring the numbers",
+            "start": "2026-11-18T17:00:00",
+            "timeZone": "Europe/Amsterdam",
+            "duration": "PT1H",
+            "alerts": { "a": { "trigger": { "@type": "OffsetTrigger", "offset": "-PT15M" } } },
+            "keywords": { "Work": true },
+            "recurrenceRule": { "@type": "RecurrenceRule", "frequency": "weekly", "count": 6 },
+            "recurrenceOverrides": {
+                "2026-11-25T17:00:00": { "title": "Review (moved)", "start": "2026-11-25T18:00:00",
+                    "description": "Other room" },
+                "2026-12-02T17:00:00": { "excluded": true },
+            },
+        })
+    }
+
+    /// The device's form of `event` with `edit` applied.
+    fn device(event: &Value, edit: impl FnOnce(&mut Element)) -> Element {
+        let mut data = to_eas(event, &plain(), "rob@example.com");
+        edit(&mut data);
+        data
+    }
+
+    fn without(data: &mut Element, tags: &[crate::wbxml::Tag]) {
+        data.children.retain(|n| match n {
+            crate::wbxml::Node::Element(e) => !tags.contains(&e.tag),
+            _ => true,
+        });
+    }
+
+    fn set(data: &mut Element, tag: crate::wbxml::Tag, value: &str) {
+        without(data, &[tag]);
+        data.push(Element::with_text(tag, value));
+    }
+
+    #[test]
+    fn eas14_changes_clear_what_is_left_out_except_body_and_exceptions() {
+        let event = series();
+        let data = device(&event, |d| {
+            without(d, &[airsyncbase::Body, cal::Exceptions, cal::Reminder]);
+            set(d, cal::Subject, "Review 2");
+        });
+        let patch = change_from_eas(&event, &data, 141, None, "rob@example.com");
+        assert_eq!(patch["title"], "Review 2");
+        assert_eq!(patch["alerts"], Value::Null);
+        assert!(!patch.contains_key("description"));
+        assert!(patch.keys().all(|k| !k.starts_with("recurrenceOverrides")));
+        assert!(patch["recurrenceRule"].is_object());
+    }
+
+    #[test]
+    fn eas14_changes_keep_fields_the_device_does_not_support() {
+        let event = series();
+        let data = device(&event, |d| without(d, &[cal::Reminder, cal::Categories]));
+        let supported = [cal::Subject.to_string(), cal::Reminder.to_string()];
+        let patch = change_from_eas(&event, &data, 141, Some(&supported), "rob@example.com");
+        // Supported but left out: cleared. Not supported: unchanged.
+        assert_eq!(patch["alerts"], Value::Null);
+        assert!(!patch.contains_key("keywords"));
+    }
+
+    #[test]
+    fn eas16_changes_write_only_what_the_device_sent() {
+        let event = series();
+        let data = Element::new(airsync::ApplicationData)
+            .child(Element::with_text(cal::StartTime, "20261118T150000Z"))
+            .child(Element::with_text(cal::EndTime, "20261118T170000Z"));
+        let patch = change_from_eas(&event, &data, 161, None, "rob@example.com");
+        assert_eq!(patch["start"], "2026-11-18T16:00:00");
+        assert_eq!(patch["duration"], "PT2H");
+        assert_eq!(patch["timeZone"], "Europe/Amsterdam");
+        for key in [
+            "title",
+            "description",
+            "alerts",
+            "keywords",
+            "recurrenceRule",
+        ] {
+            assert!(!patch.contains_key(key), "{key}: {patch:?}");
+        }
+    }
+
+    #[test]
+    fn sent_exceptions_merge_and_others_stay() {
+        let event = series();
+        let data = device(&event, |d| {
+            without(d, &[cal::Exceptions]);
+            d.push(
+                Element::new(cal::Exceptions).child(
+                    Element::new(cal::Exception)
+                        .child(Element::with_text(
+                            cal::ExceptionStartTime,
+                            "20261125T160000Z",
+                        ))
+                        .child(Element::with_text(cal::Subject, "Review (room 2)"))
+                        .child(Element::with_text(cal::StartTime, "20261125T170000Z"))
+                        .child(Element::with_text(cal::EndTime, "20261125T180000Z")),
+                ),
+            );
+        });
+        let patch = change_from_eas(&event, &data, 141, None, "rob@example.com");
+        let moved = &patch["recurrenceOverrides/2026-11-25T17:00:00"];
+        assert_eq!(moved["title"], "Review (room 2)");
+        assert_eq!(moved["description"], "Other room");
+        assert!(!patch.contains_key("recurrenceOverrides"));
+        assert!(!patch.contains_key("recurrenceOverrides/2026-12-02T17:00:00"));
+    }
+
+    #[test]
+    fn first_exceptions_are_written_whole() {
+        let mut event = series();
+        event.as_object_mut().unwrap().remove("recurrenceOverrides");
+        let data = device(&series(), |_| {});
+        let patch = change_from_eas(&event, &data, 141, None, "rob@example.com");
+        assert_eq!(
+            patch["recurrenceOverrides"]["2026-12-02T17:00:00"]["excluded"],
+            true
+        );
+        assert!(patch.keys().all(|k| !k.starts_with("recurrenceOverrides/")));
+    }
+
+    #[test]
+    fn a_series_made_single_drops_its_occurrences() {
+        let event = series();
+        let data = device(&event, |d| without(d, &[cal::Recurrence, cal::Exceptions]));
+        let patch = change_from_eas(&event, &data, 141, None, "rob@example.com");
+        assert_eq!(patch["recurrenceRule"], Value::Null);
+        assert_eq!(patch["recurrenceOverrides"], Value::Null);
     }
 }

@@ -53,7 +53,7 @@ account's password also stops it.
 `show` prints what the server holds for a device: its FolderSync key,
 each collection (EAS collection id, the JMAP folder behind it, SyncKey,
 how many items the device has, when its state last changed and the sticky
-options: FilterType, body types, number of `<Supported>` contact fields),
+options: FilterType, body types, number of `<Supported>` fields),
 the last Ping parameters, quarantined items and the last command that
 failed with an error.
 

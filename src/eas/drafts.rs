@@ -14,7 +14,7 @@ use super::{
     sync::Folder,
 };
 use crate::{
-    jmap::{BodyValues, Email, EmailAddress, JmapClient},
+    jmap::{BodyValues, Email, JmapClient},
     wbxml::{
         Element,
         cp::{airsyncbase as base, email, email2},
@@ -257,24 +257,12 @@ fn build(
     files: &[&File],
 ) -> anyhow::Result<Vec<u8>> {
     let field = |tag| data.child_text(tag).map(str::to_owned);
-    let joined = |list: &Option<Vec<EmailAddress>>| {
-        list.as_ref().map(|list| {
-            list.iter()
-                .filter_map(|a| {
-                    let address = a.email.as_deref()?;
-                    Some(match a.name.as_deref().filter(|n| !n.is_empty()) {
-                        Some(name) => format!("\"{}\" <{address}>", name.replace('"', "")),
-                        None => address.to_owned(),
-                    })
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-    };
-    let to = field(email::To).or_else(|| base.and_then(|b| joined(&b.to)));
-    let cc = field(email::Cc).or_else(|| base.and_then(|b| joined(&b.cc)));
+    // A field the device left out is removed (MS-ASCMD 2.2.3.24), except
+    // the body, which stays as it was.
+    let to = field(email::To);
+    let cc = field(email::Cc);
     let bcc = field(email2::Bcc);
-    let subject = field(email::Subject).or_else(|| base.and_then(|b| b.subject.clone()));
+    let subject = field(email::Subject);
     let (text, html) = match data.find(base::Body) {
         Some(body) => {
             let content = body.child_text(base::Data).unwrap_or_default().to_owned();
@@ -307,6 +295,16 @@ fn build(
     }
     if let Some(subject) = subject {
         builder = builder.subject(subject);
+    }
+    // A reply saved as a draft stays in its thread; EAS has no field for
+    // these headers, so they are kept from the earlier draft.
+    if let Some(base) = base {
+        if let Some(id) = base.in_reply_to.first() {
+            builder = builder.in_reply_to(id.clone());
+        }
+        if !base.references.is_empty() {
+            builder = builder.references(base.references.clone());
+        }
     }
     builder = builder.text_body(text);
     if let Some(html) = html {
@@ -367,5 +365,36 @@ mod tests {
         );
         assert!(is_draft_edit(&data));
         assert!(!wants_send(&data));
+    }
+
+    #[test]
+    fn an_edit_removes_left_out_fields_and_keeps_body_and_thread() {
+        let base: Email = serde_json::from_value(serde_json::json!({
+            "id": "d1", "blobId": "b1", "receivedAt": "2026-11-15T10:00:00Z",
+            "subject": "Re: Plans",
+            "to": [{ "email": "ann@example.com" }],
+            "cc": [{ "email": "bob@example.com" }],
+            "inReplyTo": ["orig@example.com"],
+            "references": ["first@example.com", "orig@example.com"],
+            "textBody": [{ "partId": "1", "type": "text/plain" }],
+            "bodyValues": { "1": { "value": "Sounds good" } },
+        }))
+        .unwrap();
+        let data = Element::new(crate::wbxml::cp::airsync::ApplicationData)
+            .child(Element::with_text(email::To, "ann@example.com"));
+        let raw = build("rob@example.com", &data, Some(&base), &[]).unwrap();
+        let parsed = MessageParser::default().parse(&raw).unwrap();
+        assert!(parsed.cc().is_none());
+        assert_eq!(parsed.subject(), None);
+        assert_eq!(
+            parsed.body_text(0).as_deref().map(str::trim),
+            Some("Sounds good")
+        );
+        assert_eq!(
+            parsed.in_reply_to().and_then(|l| l.first()),
+            Some("orig@example.com")
+        );
+        let references: Vec<&str> = parsed.references().unwrap().iter().collect();
+        assert_eq!(references, ["first@example.com", "orig@example.com"]);
     }
 }

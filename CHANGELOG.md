@@ -7,6 +7,16 @@
 - The warning for a login without a JMAP mail account no longer blames
   OAuth when the login was a password (for example an app password limited
   to IMAP and SMTP).
+- Device changes follow MS-ASCMD on fields the device leaves out:
+  - Calendar: a left-out description (iOS leaves it out when only the time
+    changes) or `<Exceptions>` stays as it is, and so does a single
+    occurrence left out of `<Exceptions>`. With EAS 16, every left-out field
+    stays; with EAS 14, `<Supported>` now also applies to calendars.
+    Occurrences keep what EAS cannot show, also when one is changed by
+    InstanceId.
+  - Contacts: a left-out body no longer deletes the notes.
+  - Drafts (EAS 16): a left-out To, Cc or Subject is removed instead of
+    kept, and an edited reply keeps its `In-Reply-To` and `References`.
 
 ## 0.2.0 (2026-11-15)
 

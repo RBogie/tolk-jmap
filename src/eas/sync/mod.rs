@@ -77,8 +77,8 @@ pub(super) use crate::store::Snapshot;
 pub struct SyncOptions {
     pub filter_type: u8,
     pub body_preferences: Vec<BodyPreference>,
-    /// The contact fields the device manages (`<Supported>`, sent with
-    /// SyncKey 0), as tag names; `None` when it sent none.
+    /// The contact or calendar fields the device manages (`<Supported>`,
+    /// sent with SyncKey 0), as tag names; `None` when it sent none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported: Option<Vec<String>>,
 }
@@ -560,8 +560,13 @@ async fn sync_collection(
                     touched = applied.touched;
                 }
                 FolderKind::Calendar => {
-                    let mut kind =
-                        calendar::CalendarChanges::new(req, jmap, &folder.jmap_id, &body);
+                    let mut kind = calendar::CalendarChanges::new(
+                        req,
+                        jmap,
+                        &folder.jmap_id,
+                        &body,
+                        options.supported.as_deref(),
+                    );
                     let applied =
                         device_changes::apply(req, &folder, commands, &mut kind, &mut snapshot)
                             .await?;
