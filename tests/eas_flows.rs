@@ -573,6 +573,76 @@ async fn calendar_events_sync() {
 }
 
 #[tokio::test]
+async fn calendar_changes_without_a_body_keep_the_description() {
+    use tolk::wbxml::cp::airsyncbase as base;
+    let h = Harness::start().await;
+    h.jmap.change(|m| {
+        m.insert(
+            "CalendarEvent",
+            json!({
+                "@type": "Event",
+                "uid": "ev1@example.org",
+                "calendarIds": { "cal1": true },
+                "title": "Review",
+                "description": "Bring the numbers",
+                "start": "2026-11-18T17:00:00",
+                "timeZone": "Etc/UTC",
+                "duration": "PT1H",
+                "updated": "2026-10-30T10:00:00Z",
+            }),
+        )
+    });
+    let (device, folders) = h.ready_device("d1").await;
+    let calendar = folders.id("Calendar");
+    let initial = device.initial_sync(&calendar).await;
+    let server_id = initial.add_ids()[0].clone();
+    let change = |start: &str, body: Option<Element>| {
+        let mut data = Element::new(airsync::ApplicationData)
+            .child(text(cal::Subject, "Review"))
+            .child(text(cal::StartTime, start))
+            .child(text(cal::EndTime, "20261118T190000Z"));
+        if let Some(body) = body {
+            data.push(body);
+        }
+        Element::new(airsync::Commands).child(
+            Element::new(airsync::Change)
+                .child(text(airsync::ServerId, server_id.clone()))
+                .child(data),
+        )
+    };
+    let event = |m: &support::fake_jmap::Model| m.all("CalendarEvent")[0].clone();
+
+    // Like iOS after moving the event: no body, the description stays.
+    let moved = device
+        .sync(
+            &calendar,
+            &initial.key,
+            Some(change("20261118T160000Z", None)),
+        )
+        .await;
+    assert!(moved.responses.is_empty(), "{:?}", moved.responses);
+    h.jmap.read(|m| {
+        let event = event(m);
+        assert_eq!(event["start"], "2026-11-18T16:00:00");
+        assert_eq!(event["description"], "Bring the numbers");
+    });
+
+    // An empty body clears it.
+    let cleared = Element::new(base::Body)
+        .child(text(base::Type, "1"))
+        .child(Element::new(base::Data));
+    let emptied = device
+        .sync(
+            &calendar,
+            &moved.key,
+            Some(change("20261118T160000Z", Some(cleared))),
+        )
+        .await;
+    assert!(emptied.responses.is_empty(), "{:?}", emptied.responses);
+    h.jmap.read(|m| assert!(event(m)["description"].is_null()));
+}
+
+#[tokio::test]
 async fn lost_change_history_resyncs_without_losing_items() {
     let h = Harness::start().await;
     h.jmap.add_email("inbox", "Old", "x");
@@ -1643,6 +1713,16 @@ async fn eas16_calendar_uses_locations_and_instance_ids() {
         Some("20261109T170000Z")
     );
     let server_id = initial.add_ids()[0].clone();
+    // A note on one occurrence, which EAS cannot show.
+    h.jmap.change(|m| {
+        m.patch(
+            "CalendarEvent",
+            &id,
+            json!({ "recurrenceOverrides/2026-11-16T18:00:00": { "description": "Bring towels" } })
+                .as_object()
+                .unwrap(),
+        );
+    });
 
     // Move one occurrence an hour later, delete another.
     let commands = Element::new(airsync::Commands)
@@ -1671,6 +1751,10 @@ async fn eas16_calendar_uses_locations_and_instance_ids() {
             overrides["2026-11-16T18:00:00"]["start"],
             "2026-11-16T19:00:00"
         );
+        assert_eq!(
+            overrides["2026-11-16T18:00:00"]["description"], "Bring towels",
+            "what the device left out stays"
+        );
         assert_eq!(overrides["2026-11-23T18:00:00"]["excluded"], true);
         assert_eq!(
             m.get("CalendarEvent", &id).unwrap()["title"],
@@ -1695,6 +1779,7 @@ async fn eas16_drafts_are_saved_edited_and_sent() {
             .child(
                 Element::new(airsync::ApplicationData)
                     .child(text(em::To, "friend@example.org"))
+                    .child(text(em::Cc, "boss@example.org"))
                     .child(text(em::Subject, "Plans"))
                     .child(
                         Element::new(base::Body)
@@ -1720,7 +1805,11 @@ async fn eas16_drafts_are_saved_edited_and_sent() {
         Element::new(airsync::Change)
             .child(text(airsync::ServerId, server_id.clone()))
             .child(
-                Element::new(airsync::ApplicationData).child(text(em::Subject, "Plans for Friday")),
+                // A Change carries the draft's fields: the left-out Cc is
+                // removed, the left-out body stays (MS-ASCMD 2.2.3.24).
+                Element::new(airsync::ApplicationData)
+                    .child(text(em::To, "friend@example.org"))
+                    .child(text(em::Subject, "Plans for Friday")),
             ),
     );
     let edited = device.sync(&drafts, &saved.key, Some(edit)).await;

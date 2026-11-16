@@ -76,6 +76,8 @@ pub struct Email {
     #[serde(default, deserialize_with = "null_as_default")]
     pub message_id: Vec<String>,
     #[serde(default, deserialize_with = "null_as_default")]
+    pub in_reply_to: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub references: Vec<String>,
     #[serde(default)]
     pub thread_id: Option<String>,
@@ -198,7 +200,7 @@ impl JmapClient {
                     "properties": [
                         "id", "blobId", "mailboxIds", "keywords", "size", "receivedAt", "subject",
                         "from", "to", "cc", "replyTo", "htmlBody", "textBody",
-                        "attachments", "bodyValues", "messageId", "references",
+                        "attachments", "bodyValues", "messageId", "inReplyTo", "references",
                         "threadId", "preview", "header:Importance:asText", "header:X-Priority:asText",
                     ],
                     "bodyProperties": ["partId", "blobId", "size", "name", "type", "cid", "disposition"],

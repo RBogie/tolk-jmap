@@ -506,6 +506,7 @@ mod tests {
             ]
             .into(),
             message_id: vec!["orig@example.com".to_owned()],
+            in_reply_to: Vec::new(),
             references: vec!["root@example.com".to_owned()],
             thread_id: None,
             preview: None,

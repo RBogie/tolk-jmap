@@ -8,7 +8,8 @@
 //! A field the device did not send counts as cleared, unless the device
 //! does not manage it: with `<Supported>` (MS-ASCMD ghosting) only the
 //! listed fields are managed, without it every field the mapping knows. The
-//! photo only changes when `<Picture>` is sent; an empty one removes it.
+//! photo and the notes only change when `<Picture>` or `<Body>` is sent
+//! (MS-ASCMD 2.2.3.24); an empty one removes them.
 
 use std::collections::BTreeSet;
 
@@ -607,17 +608,13 @@ fn keywords(ctx: &Ctx, patch: &mut Map<String, Value>) {
     });
 }
 
-/// The body shows every note; a changed one replaces them.
+/// The body shows every note; a changed one replaces them. A Change
+/// without a body leaves them as they are (MS-ASCMD 2.2.3.24).
 fn notes(ctx: &Ctx, patch: &mut Map<String, Value>) {
-    let body = ctx.data.find(airsyncbase::Body);
-    let manages = body.is_some()
-        || ctx.supported.is_none_or(|s| {
-            let tag = airsyncbase::Body.to_string();
-            s.contains(&tag)
-        });
-    if !manages {
+    let Some(body) = ctx.data.find(airsyncbase::Body) else {
         return;
-    }
+    };
+    let body = Some(body);
     let text = |body: Option<&Element>| {
         body.and_then(|b| b.child_text(airsyncbase::Data))
             .filter(|n| !n.trim().is_empty())
@@ -794,6 +791,24 @@ mod tests {
     }
 
     #[test]
+    fn an_omitted_body_keeps_the_notes() {
+        let card = card();
+        let data = device(&card, |d| remove(d, airsyncbase::Body));
+        assert_eq!(merge(&card, &data, None, usize::MAX), Map::new());
+
+        let data = device(&card, |d| {
+            remove(d, airsyncbase::Body);
+            d.push(
+                Element::new(airsyncbase::Body)
+                    .child(Element::with_text(airsyncbase::Type, "1"))
+                    .child(Element::new(airsyncbase::Data)),
+            );
+        });
+        let after = apply(&card, merge(&card, &data, None, usize::MAX));
+        assert_eq!(after["notes"], Value::Null);
+    }
+
+    #[test]
     fn supported_limits_what_omissions_clear() {
         let card = card();
         let supported = vec![c::Email1Address.to_string(), c::FirstName.to_string()];
@@ -813,10 +828,11 @@ mod tests {
         assert_eq!(after["notes"], card["notes"]);
         assert_eq!(after["addresses"], card["addresses"]);
 
-        // Without Supported, the omitted fields are cleared.
+        // Without Supported, the omitted fields are cleared, except the
+        // notes and the photo.
         let after = apply(&card, merge(&card, &data, None, usize::MAX));
         assert!(after["name"]["components"].as_array().unwrap().len() == 1);
-        assert_eq!(after["notes"], Value::Null);
+        assert_eq!(after["notes"], card["notes"]);
         assert_eq!(after["media"], card["media"]);
         assert_eq!(after["addresses"]["y"]["full"], "Billing Way 4");
     }
