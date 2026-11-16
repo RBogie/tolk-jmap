@@ -256,17 +256,40 @@ async fn fetch_attachment(
     let mut properties = Element::new(io::Properties)
         .child(Element::with_text(airsyncbase::ContentType, content_type));
     match requested {
-        Some((start, end)) => {
-            let Some(part) = read_range(download, start, end).await? else {
-                return Ok(fetch_status(status::BAD_RANGE));
-            };
-            properties.push(Element::with_text(
-                io::Range,
-                format!("{}-{}", part.start, part.end),
-            ));
-            properties.push(Element::with_text(io::Total, part.total.to_string()));
-            properties.push(Element::with_text(io::Data, STANDARD.encode(&part.data)));
-        }
+        Some((start, end)) => match plan_range(&download, start, end) {
+            RangePlan::Stream(part) => {
+                properties.push(Element::with_text(
+                    io::Range,
+                    format!("{}-{}", part.start, part.end),
+                ));
+                properties.push(Element::with_text(io::Total, part.total.to_string()));
+                properties.push(Element {
+                    tag: io::Data,
+                    children: vec![req.downloads.add_window(
+                        download,
+                        stream::Encoding::Base64,
+                        part.skip,
+                        part.end - part.start + 1,
+                    )],
+                });
+            }
+            RangePlan::PastTheEnd => return Ok(fetch_status(status::BAD_RANGE)),
+            // Without the lengths up front, the part is read into memory
+            // first, so at most MAX_RANGE of it; the response's Range says
+            // what was sent, and the device asks for the rest.
+            RangePlan::Unknown => {
+                let end = end.min(start.saturating_add(MAX_RANGE - 1));
+                let Some(part) = read_range(download, start, end).await? else {
+                    return Ok(fetch_status(status::BAD_RANGE));
+                };
+                properties.push(Element::with_text(
+                    io::Range,
+                    format!("{}-{}", part.start, part.end),
+                ));
+                properties.push(Element::with_text(io::Total, part.total.to_string()));
+                properties.push(Element::with_text(io::Data, STANDARD.encode(&part.data)));
+            }
+        },
         None => properties.push(Element {
             tag: io::Data,
             children: vec![req.downloads.add(download, stream::Encoding::Base64)],
@@ -283,6 +306,82 @@ fn parse_range(range: &str) -> Option<(u64, u64)> {
     let start: u64 = start.trim().parse().ok()?;
     let end: u64 = end.trim().parse().ok()?;
     (start <= end).then_some((start, end))
+}
+
+/// The most bytes a Range fetch reads into memory (10 MiB), when the server
+/// gives no lengths and the part cannot be streamed.
+const MAX_RANGE: u64 = 10 * 1024 * 1024;
+
+/// How the part of a Range fetch is written.
+#[derive(Debug, PartialEq, Eq)]
+enum RangePlan {
+    /// Streamed from the download, skipping `skip` bytes first.
+    Stream(StreamedRange),
+    /// The range starts after the last byte.
+    PastTheEnd,
+    /// The server gave no lengths: read the part before answering.
+    Unknown,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StreamedRange {
+    start: u64,
+    end: u64,
+    total: u64,
+    skip: u64,
+}
+
+/// The Range and Total of a fetch of `start..=end`, from the headers of a
+/// 206 (the range itself) or 200 (the whole blob) answer.
+fn plan_range(download: &reqwest::Response, start: u64, end: u64) -> RangePlan {
+    plan_range_from(
+        download.status() == reqwest::StatusCode::PARTIAL_CONTENT,
+        download
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok()),
+        download.content_length(),
+        start,
+        end,
+    )
+}
+
+fn plan_range_from(
+    partial: bool,
+    content_range: Option<&str>,
+    content_length: Option<u64>,
+    start: u64,
+    end: u64,
+) -> RangePlan {
+    let Some(length) = content_length else {
+        return RangePlan::Unknown;
+    };
+    let (first, total, skip) = if partial {
+        match content_range.and_then(parse_content_range) {
+            Some((first, total)) => (first, total, 0),
+            None => return RangePlan::Unknown,
+        }
+    } else {
+        (start, length, start)
+    };
+    let available = if partial {
+        length
+    } else {
+        length.saturating_sub(start)
+    };
+    if available == 0 || first >= total {
+        return RangePlan::PastTheEnd;
+    }
+    let last = end.min(first.saturating_add(available - 1));
+    if last < first {
+        return RangePlan::PastTheEnd;
+    }
+    RangePlan::Stream(StreamedRange {
+        start: first,
+        end: last,
+        total,
+        skip,
+    })
 }
 
 /// The bytes of an attachment a Range fetch returns.
@@ -332,7 +431,7 @@ async fn read_range(
         offset += chunk.len() as u64;
         if offset > start && chunk_start <= end {
             let from = start.saturating_sub(chunk_start) as usize;
-            let to = (end + 1 - chunk_start).min(chunk.len() as u64) as usize;
+            let to = (end.saturating_add(1) - chunk_start).min(chunk.len() as u64) as usize;
             data.extend_from_slice(&chunk[from..to]);
         }
         if offset > end && known_total.is_some() {
@@ -405,6 +504,58 @@ mod tests {
         assert_eq!(parse_range(" 90 - 200 "), Some((90, 200)));
         assert_eq!(parse_range("5-1"), None);
         assert_eq!(parse_range("x"), None);
+        // The whole blob (200): the part is cut from it.
+        assert_eq!(
+            plan_range_from(false, None, Some(100), 10, 19),
+            RangePlan::Stream(StreamedRange {
+                start: 10,
+                end: 19,
+                total: 100,
+                skip: 10
+            })
+        );
+        assert_eq!(
+            plan_range_from(false, None, Some(100), 90, u64::MAX),
+            RangePlan::Stream(StreamedRange {
+                start: 90,
+                end: 99,
+                total: 100,
+                skip: 90
+            })
+        );
+        assert_eq!(
+            plan_range_from(false, None, Some(100), 100, 200),
+            RangePlan::PastTheEnd
+        );
+        // The range itself (206).
+        assert_eq!(
+            plan_range_from(true, Some("bytes 10-19/100"), Some(10), 10, 19),
+            RangePlan::Stream(StreamedRange {
+                start: 10,
+                end: 19,
+                total: 100,
+                skip: 0
+            })
+        );
+        // No lengths: read first.
+        assert_eq!(plan_range_from(false, None, None, 0, 9), RangePlan::Unknown);
+        assert_eq!(
+            plan_range_from(true, None, Some(10), 0, 9),
+            RangePlan::Unknown
+        );
+        // Streamed, so not limited.
+        let big = 50 * 1024 * 1024;
+        assert_eq!(
+            plan_range_from(false, None, Some(big), 0, big - 1),
+            RangePlan::Stream(StreamedRange {
+                start: 0,
+                end: big - 1,
+                total: big,
+                skip: 0
+            })
+        );
+        // The end may be anything up to u64::MAX; reading stops at the blob.
+        assert_eq!(parse_range("5-18446744073709551615"), Some((5, u64::MAX)));
         assert_eq!(parse_content_range("bytes 10-19/100"), Some((10, 100)));
         assert_eq!(parse_content_range("bytes 10-19/*"), None);
     }

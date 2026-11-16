@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- Attachment and message downloads to the device are no longer cut off
+  after 30 seconds on a slow connection: they only fail when the JMAP
+  server sends nothing for 90 seconds. Other JMAP calls keep their
+  30-second limit.
+- SmartReply and SmartForward with `ReplaceMime` (as iOS sends them) mark
+  the original as answered or forwarded.
+- ItemOperations Range fetches are streamed to the device like whole
+  attachments instead of read into memory first. Only when the JMAP server
+  gives no lengths is the part read first, and then at most 10 MiB (the
+  response's Range says what was sent). A Range ending at the largest
+  number no longer makes the request fail.
+- docs: compatibility.md no longer says remote wipe is not offered.
 - Failed sends:
   - A message the JMAP server refuses no longer leaves a copy in Sent.
   - When the server's answer to a send is lost, the device is told to try

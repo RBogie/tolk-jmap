@@ -2184,6 +2184,14 @@ async fn attachments_stream_into_item_operations() {
             .await;
         assert_eq!(data(&reply), file[300_000..]);
         assert_eq!(range(&reply).1, "300000-300000");
+        // The largest end there is reads to the end of the file.
+        let reply = device
+            .send(
+                "ItemOperations",
+                Some(fetch(Some("300000-18446744073709551615"))),
+            )
+            .await;
+        assert_eq!(data(&reply), file[300_000..]);
         let reply = device
             .send("ItemOperations", Some(fetch(Some("300001-400000"))))
             .await;
@@ -3419,6 +3427,35 @@ async fn smart_reply_quotes_the_original_and_marks_it_answered() {
         .await;
     assert_eq!(compose_status(&reply).as_deref(), Some("150"));
     h.jmap.read(|m| assert_eq!(m.submissions.len(), 1));
+}
+
+#[tokio::test]
+async fn replace_mime_replies_and_forwards_still_mark_the_original() {
+    let h = Harness::start().await;
+    let original = h
+        .jmap
+        .add_email("inbox", "Plans", "Shall we meet on Friday?");
+    let (device, folders) = h.ready_device("d1").await;
+    let inbox = folders.id("Inbox");
+    let item = device.initial_sync(&inbox).await.add_ids()[0].clone();
+    let mime = "From: test@example.com\r\nTo: sender@example.org\r\nSubject: Re: Plans\r\n\r\nFriday works.\r\n";
+    // iOS sends <ReplaceMime/>: the device's message is complete as it is.
+    for (cmd, root, client_id, keyword) in [
+        ("SmartReply", cm::SmartReply, "r-1", "$answered"),
+        ("SmartForward", cm::SmartForward, "f-1", "$forwarded"),
+    ] {
+        let mut request = smart(root, client_id, Some((&inbox, &item)), mime);
+        request.push(Element::new(cm::ReplaceMime));
+        let reply = device.send(cmd, Some(request)).await;
+        assert_eq!(compose_status(&reply), None);
+        h.jmap.read(|m| {
+            assert_eq!(
+                m.get("Email", &original).unwrap()["keywords"][keyword],
+                true,
+                "{cmd}"
+            );
+        });
+    }
 }
 
 #[tokio::test]

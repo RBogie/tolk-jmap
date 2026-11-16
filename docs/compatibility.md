@@ -27,7 +27,7 @@ Tolk speaks Exchange ActiveSync 14.0, 14.1, 16.0 and 16.1 (configurable with `EA
 
 | Command | Support |
 |---|---|
-| Provision | Two-phase policy handshake. The policy asks for nothing (no device password, no encryption). Remote wipe is not offered. |
+| Provision | Two-phase policy handshake. The policy asks for nothing (no device password, no encryption). A remote wipe is sent when requested with `tolk devices wipe`. |
 | FolderSync | Mailboxes, address books and calendars, including those other users share with the account (see below). |
 | FolderCreate, FolderUpdate, FolderDelete | Mail folders; address books and calendars can be created and renamed, not deleted. A deleted mail folder moves into Trash. Special folders and shared address books and calendars cannot be changed. |
 | Sync | Mail (read, flag, delete, move, fetch), contacts and calendar both ways. Hanging (`Wait`, `HeartbeatInterval`), empty and partial Syncs. With 16.x: drafts (save, edit, send, attachments added and removed) and changes to single occurrences by InstanceId. |

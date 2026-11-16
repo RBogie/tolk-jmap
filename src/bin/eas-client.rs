@@ -28,7 +28,8 @@
 //!   move <server-id> <from-folder> <to-folder>
 //!   ping <heartbeat> <folder[:Class]>...
 //!   sendmail <to> <subject> [body]
-//!   smartreply <collection> <server-id> <to> <body>
+//!   smartreply <collection> <server-id> <to> <body> [replace-mime]
+//!                                     replace-mime sends <ReplaceMime/>, as iOS
 //!   meeting-response <collection> <request-id> <1|2|3>   accept/tentative/decline
 //!   search-gal <query>
 //!   scenario <file>                   runs a scenario (see below)
@@ -377,6 +378,9 @@ async fn run(
                 );
             }
             body.push(Element::new(cm::SaveInSentItems));
+            if command == "smartreply" && args.get(4).is_some_and(|a| a == "replace-mime") {
+                body.push(Element::new(cm::ReplaceMime));
+            }
             body.push(Element::with_opaque(cm::Mime, mime.into_bytes()));
             let cmd = if command == "sendmail" {
                 "SendMail"
