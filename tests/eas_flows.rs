@@ -1050,6 +1050,61 @@ async fn conflicting_event_changes_keep_the_server_version() {
 }
 
 #[tokio::test]
+async fn editing_an_event_keeps_what_eas_cannot_show() {
+    let h = Harness::start().await;
+    let id = h.jmap.change(|m| {
+        m.insert(
+            "CalendarEvent",
+            json!({
+                "@type": "Event",
+                "uid": "ev1@example.org",
+                "calendarIds": { "cal1": true },
+                "title": "Review",
+                "start": "2026-11-18T17:00:00",
+                "timeZone": "Europe/Amsterdam",
+                "duration": "PT1H",
+                "privacy": "secret",
+                "locations": { "l1": { "name": "Room 1" }, "l2": { "name": "Online" } },
+                "alerts": {
+                    "a1": { "trigger": { "@type": "OffsetTrigger", "offset": "-PT15M" } },
+                    "a2": { "trigger": { "@type": "OffsetTrigger", "offset": "-P1D" } },
+                },
+                "recurrenceRule": { "@type": "RecurrenceRule", "frequency": "monthly",
+                    "byDay": [{ "day": "mo" }, { "day": "fr" }], "bySetPosition": [-1] },
+            }),
+        )
+    });
+    let (device, folders) = h.ready_device("d1").await;
+    let calendar = folders.id("Calendar");
+    let initial = device.initial_sync(&calendar).await;
+    let server_id = initial.add_ids()[0].clone();
+    // Like iOS: everything it was sent back, with a new subject.
+    let mut data = initial.adds[0]
+        .find(airsync::ApplicationData)
+        .unwrap()
+        .clone();
+    data.children
+        .retain(|n| !matches!(n, tolk::wbxml::Node::Element(e) if e.tag == cal::Subject));
+    data.push(text(cal::Subject, "Review (moved)"));
+    let change = Element::new(airsync::Commands).child(
+        Element::new(airsync::Change)
+            .child(text(airsync::ServerId, server_id))
+            .child(data),
+    );
+    let result = device.sync(&calendar, &initial.key, Some(change)).await;
+    assert!(result.responses.is_empty(), "{:?}", result.responses);
+    h.jmap.read(|m| {
+        let event = m.get("CalendarEvent", &id).unwrap();
+        assert_eq!(event["title"], "Review (moved)");
+        assert_eq!(event["privacy"], "secret");
+        assert_eq!(event["locations"].as_object().unwrap().len(), 2);
+        assert_eq!(event["alerts"].as_object().unwrap().len(), 2);
+        assert_eq!(event["recurrenceRule"]["bySetPosition"], json!([-1]));
+        assert_eq!(event["timeZone"], "Europe/Amsterdam");
+    });
+}
+
+#[tokio::test]
 async fn lost_change_history_resyncs_without_losing_items() {
     let h = Harness::start().await;
     h.jmap.add_email("inbox", "Old", "x");

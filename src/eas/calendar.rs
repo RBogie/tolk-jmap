@@ -342,6 +342,7 @@ impl Kind for CalendarChanges<'_> {
             self.req.version,
             self.supported,
             self.req.email,
+            self.body,
         );
         self.organize(&mut patch, data, &current["participants"]);
         Patch::Apply(patch)

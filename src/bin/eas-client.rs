@@ -14,6 +14,10 @@
 //!                                     a contact Change with only these fields
 //!                                     (Contacts tag names; an empty value
 //!                                     sends an empty element)
+//!   edit-event <collection> <key> <server-id> <Field=value>...
+//!                                     fetches the event and sends all of it
+//!                                     back with these Calendar fields
+//!                                     replaced, as iOS edits an event
 //!   add-event <collection> <key> <subject> <start> <minutes> [attendee]
 //!                                     start as 20261105T090000Z; an attendee
 //!                                     makes it a meeting (invitations go out)
@@ -207,6 +211,61 @@ async fn run(
                     .child(text(mr::RequestId, arg(1, "request-id")?)),
             );
             client.send("MeetingResponse", Some(body)).await
+        }
+        "edit-event" => {
+            let (collection, key, server_id) =
+                (arg(0, "collection")?, arg(1, "key")?, arg(2, "server-id")?);
+            let sync = |key: String, command: Element| {
+                Element::new(airsync::Sync).child(
+                    Element::new(airsync::Collections).child(
+                        Element::new(airsync::Collection)
+                            .child(text(airsync::SyncKey, key))
+                            .child(text(airsync::CollectionId, collection.clone()))
+                            .child(text(airsync::GetChanges, "0"))
+                            .child(Element::new(airsync::Commands).child(command)),
+                    ),
+                )
+            };
+            let fetch =
+                Element::new(airsync::Fetch).child(text(airsync::ServerId, server_id.clone()));
+            let reply = client
+                .send("Sync", Some(sync(key, fetch)))
+                .await?
+                .context("empty Sync response")?;
+            let found = reply
+                .find(airsync::Collections)
+                .and_then(|c| c.find(airsync::Collection))
+                .context("no collection in the response")?;
+            let next_key = found
+                .child_text(airsync::SyncKey)
+                .context("no SyncKey")?
+                .to_owned();
+            let mut data = found
+                .find(airsync::Responses)
+                .and_then(|r| r.find(airsync::Fetch))
+                .and_then(|f| f.find(airsync::ApplicationData))
+                .context("the event was not fetched")?
+                .clone();
+            let page = wbxml::cp::page(4).context("no Calendar code page")?;
+            for field in args.iter().skip(3) {
+                let (name, value) = field.split_once('=').context("Field=value")?;
+                let (token, _) = page
+                    .tags
+                    .iter()
+                    .find(|(_, n)| *n == name)
+                    .with_context(|| format!("no calendar field {name}"))?;
+                let tag = wbxml::Tag {
+                    page: page.number,
+                    token: *token,
+                };
+                data.children
+                    .retain(|n| !matches!(n, wbxml::Node::Element(e) if e.tag == tag));
+                data.push(text(tag, value));
+            }
+            let change = Element::new(airsync::Change)
+                .child(text(airsync::ServerId, server_id))
+                .child(data);
+            client.send("Sync", Some(sync(next_key, change))).await
         }
         "sync-read" | "sync-delete" | "add-event" | "change-contact" => {
             let (collection, key) = (arg(0, "collection")?, arg(1, "key")?);
