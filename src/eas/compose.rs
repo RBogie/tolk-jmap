@@ -10,7 +10,7 @@ use mail_builder::{MessageBuilder, headers::address::Address as BuilderAddress};
 use mail_parser::{AddressList, Message, MessageParser};
 use serde_json::{Map, Value};
 
-use super::{CommandError, Request, email, query::EasQuery, search, sync};
+use super::{CommandError, Request, email, outbox, query::EasQuery, search, sync};
 use crate::{
     jmap::{self, BodyValues, Email, JmapClient},
     wbxml::{Element, Tag, cp::compose_mail as cm},
@@ -19,6 +19,8 @@ use crate::{
 mod status {
     pub const INVALID_MIME: &str = "107";
     pub const SERVER_ERROR: &str = "110";
+    pub const RETRY_LATER: &str = "111";
+    pub const RECIPIENT_UNRESOLVED: &str = "116";
     pub const ALREADY_SENT: &str = "118";
     pub const NO_RECIPIENT: &str = "119";
     pub const SUBMISSION_FAILED: &str = "120";
@@ -73,22 +75,31 @@ pub async fn handle(
     };
     let save_in_sent =
         body.find(cm::SaveInSentItems).is_some() || query_param(query, "SaveInSent") == Some("T");
-    let client_id = body.child_text(cm::ClientId).unwrap_or_default();
-    if !client_id.is_empty()
-        && !req
-            .store
-            .claim_client_id(req.user, req.device_id, client_id)?
+    let client_id = body.child_text(cm::ClientId).filter(|c| !c.is_empty());
+    if let Some(client_id) = client_id
+        && req.store.send_record(req.user, req.device_id, client_id)?
+            == Some(crate::store::SendRecord::Sent)
     {
         tracing::info!(client_id, "message already sent, ignoring retry");
         return Ok(failure(status::ALREADY_SENT));
     }
+    let message = Outgoing {
+        client_id,
+        kind,
+        mime: &mime,
+        save_in_sent,
+    };
+    Ok(send(req, jmap, query, body, &message)
+        .await?
+        .and_then(failure))
+}
 
-    let result = send(req, jmap, query, body, kind, &mime, save_in_sent).await;
-    if !matches!(result, Ok(None)) && !client_id.is_empty() {
-        req.store
-            .release_client_id(req.user, req.device_id, client_id)?;
-    }
-    Ok(result?.and_then(failure))
+/// The message a SendMail, SmartReply or SmartForward carries.
+struct Outgoing<'a> {
+    client_id: Option<&'a str>,
+    kind: Kind,
+    mime: &'a [u8],
+    save_in_sent: bool,
 }
 
 fn query_param<'a>(query: &'a EasQuery, name: &str) -> Option<&'a str> {
@@ -105,10 +116,9 @@ async fn send(
     jmap: &JmapClient,
     query: &EasQuery,
     body: &Element,
-    kind: Kind,
-    mime: &[u8],
-    save_in_sent: bool,
+    message: &Outgoing<'_>,
 ) -> Result<Option<&'static str>, CommandError> {
+    let (kind, mime) = (message.kind, message.mime);
     let Some(parsed) = MessageParser::default().parse(mime) else {
         return Ok(Some(status::INVALID_MIME));
     };
@@ -157,15 +167,23 @@ async fn send(
         }
     };
 
-    if let Err(e) = jmap
-        .send_message(raw, &from, &recipients, save_in_sent)
-        .await
-    {
-        if jmap::is_unauthorized(&e) {
-            return Err(e.into());
+    let outgoing = outbox::Message {
+        key: message.client_id,
+        mail_from: &from,
+        rcpt_to: &recipients,
+        keep_copy: message.save_in_sent,
+    };
+    match outbox::send(req, jmap, &outgoing, raw).await? {
+        outbox::Outcome::Sent => {}
+        outbox::Outcome::AlreadySent => return Ok(Some(status::ALREADY_SENT)),
+        outbox::Outcome::Rejected(refusal) => {
+            return Ok(Some(match refusal {
+                outbox::Refusal::NoRecipients => status::NO_RECIPIENT,
+                outbox::Refusal::InvalidRecipients => status::RECIPIENT_UNRESOLVED,
+                outbox::Refusal::Other => status::SUBMISSION_FAILED,
+            }));
         }
-        tracing::warn!(error = format!("{e:#}"), "message submission failed");
-        return Ok(Some(status::SUBMISSION_FAILED));
+        outbox::Outcome::Unknown => return Ok(Some(status::RETRY_LATER)),
     }
     tracing::info!(?kind, recipients = recipients.len(), "message sent");
 

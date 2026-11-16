@@ -11,10 +11,12 @@ use mail_parser::MessageParser;
 use super::{
     Request,
     compose::{builder_addresses, recipients, strip_bcc},
+    outbox,
     sync::Folder,
 };
 use crate::{
     jmap::{BodyValues, Email, JmapClient},
+    store::SendRecord,
     wbxml::{
         Element,
         cp::{airsyncbase as base, email, email2},
@@ -222,31 +224,65 @@ pub(super) fn attachment_references(saved: &Saved) -> Option<Element> {
     Some(attachments)
 }
 
-/// Sends a stored draft and deletes it (the copy goes to Sent).
-pub(super) async fn send(req: &Request<'_>, jmap: &JmapClient, id: &str) -> anyhow::Result<()> {
-    let draft = jmap
-        .get_emails(&[id], BodyValues::None, 0)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("draft {id} is gone"))?;
-    let raw = jmap
-        .download(&draft.blob_id, "draft.eml", "message/rfc822")
-        .await?;
-    let parsed = MessageParser::default()
-        .parse(&raw)
-        .ok_or_else(|| anyhow::anyhow!("draft {id} does not parse"))?;
-    let to = recipients(&parsed);
-    anyhow::ensure!(!to.is_empty(), "draft {id} has no recipients");
-    jmap.send_message(strip_bcc(&raw), req.email, &to, true)
-        .await?;
-    jmap.set(
-        crate::jmap::EMAIL,
-        crate::jmap::SetRequest::default().destroy(vec![id.to_owned()]),
-    )
-    .await?;
-    tracing::info!(recipients = to.len(), "device sent a draft");
-    Ok(())
+/// The key a draft's send is recorded under (see [`outbox`]).
+pub(super) fn send_key(id: &str) -> String {
+    format!("draft:{id}")
+}
+
+/// What an earlier send of this draft left, if any.
+pub(super) fn send_record(req: &Request<'_>, id: &str) -> anyhow::Result<Option<SendRecord>> {
+    req.store
+        .send_record(req.user, req.device_id, &send_key(id))
+}
+
+/// Sends a stored draft once and deletes it (the copy goes to Sent).
+pub(super) async fn send(
+    req: &Request<'_>,
+    jmap: &JmapClient,
+    id: &str,
+) -> anyhow::Result<outbox::Outcome> {
+    let key = send_key(id);
+    let outcome = if send_record(req, id)? == Some(SendRecord::Sent) {
+        outbox::Outcome::AlreadySent
+    } else {
+        let Some(draft) = jmap
+            .get_emails(&[id], BodyValues::None, 0)
+            .await?
+            .into_iter()
+            .next()
+        else {
+            tracing::warn!(draft = id, "draft to send is gone");
+            return Ok(outbox::Outcome::Rejected(outbox::Refusal::Other));
+        };
+        let raw = jmap
+            .download(&draft.blob_id, "draft.eml", "message/rfc822")
+            .await?;
+        let to = MessageParser::default()
+            .parse(&raw)
+            .map(|parsed| recipients(&parsed))
+            .unwrap_or_default();
+        if to.is_empty() {
+            tracing::warn!(draft = id, "draft to send has no recipients");
+            return Ok(outbox::Outcome::Rejected(outbox::Refusal::NoRecipients));
+        }
+        let message = outbox::Message {
+            key: Some(&key),
+            mail_from: req.email,
+            rcpt_to: &to,
+            keep_copy: true,
+        };
+        outbox::send(req, jmap, &message, strip_bcc(&raw)).await?
+    };
+    if matches!(
+        outcome,
+        outbox::Outcome::Sent | outbox::Outcome::AlreadySent
+    ) {
+        if let Err(e) = jmap.destroy_email(id).await {
+            tracing::warn!(error = format!("{e:#}"), "sent draft left in Drafts");
+        }
+        tracing::info!(draft = id, "device sent a draft");
+    }
+    Ok(outcome)
 }
 
 /// The message for the device's fields, on top of an earlier version.

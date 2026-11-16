@@ -3,6 +3,17 @@
 
 use super::*;
 
+/// What an earlier attempt of a send left (see [`Store::claim_send`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendRecord {
+    /// No earlier attempt: claimed now.
+    New,
+    /// The message went out.
+    Sent,
+    /// An attempt whose outcome is not known, with the message it stored.
+    Pending(Option<String>),
+}
+
 impl Store {
     /// Returns the EAS folder id of each mailbox, assigning new ids as needed.
     pub fn folder_server_ids(
@@ -133,19 +144,81 @@ impl Store {
             .optional()?)
     }
 
-    /// Records a message ClientId; false when it was already used.
-    pub fn claim_client_id(
+    /// Claims a send (a message ClientId, or a draft); what an earlier
+    /// attempt with the same key left, if any.
+    pub fn claim_send(&self, user: &str, device_id: &str, key: &str) -> anyhow::Result<SendRecord> {
+        let conn = self.conn.locked();
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO sent_client_ids (user, device_id, client_id, sent_at, done)
+             VALUES (?1, ?2, ?3, ?4, 0)",
+            params![user, device_id, key, unix_now()],
+        )?;
+        if inserted == 1 {
+            return Ok(SendRecord::New);
+        }
+        let (done, email_id): (bool, Option<String>) = conn.query_row(
+            "SELECT done, email_id FROM sent_client_ids
+             WHERE user = ?1 AND device_id = ?2 AND client_id = ?3",
+            params![user, device_id, key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(if done {
+            SendRecord::Sent
+        } else {
+            SendRecord::Pending(email_id)
+        })
+    }
+
+    /// What a send left, without claiming it.
+    pub fn send_record(
         &self,
         user: &str,
         device_id: &str,
-        client_id: &str,
-    ) -> anyhow::Result<bool> {
-        let inserted = self.conn.locked().execute(
-            "INSERT OR IGNORE INTO sent_client_ids (user, device_id, client_id, sent_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![user, device_id, client_id, unix_now()],
+        key: &str,
+    ) -> anyhow::Result<Option<SendRecord>> {
+        Ok(self
+            .conn
+            .locked()
+            .query_row(
+                "SELECT done, email_id FROM sent_client_ids
+                 WHERE user = ?1 AND device_id = ?2 AND client_id = ?3",
+                params![user, device_id, key],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+            .map(|(done, email_id)| {
+                if done {
+                    SendRecord::Sent
+                } else {
+                    SendRecord::Pending(email_id)
+                }
+            }))
+    }
+
+    /// Remembers the message stored for a claimed send.
+    pub fn note_send_email(
+        &self,
+        user: &str,
+        device_id: &str,
+        key: &str,
+        email_id: &str,
+    ) -> anyhow::Result<()> {
+        self.conn.locked().execute(
+            "UPDATE sent_client_ids SET email_id = ?4
+             WHERE user = ?1 AND device_id = ?2 AND client_id = ?3",
+            params![user, device_id, key, email_id],
         )?;
-        Ok(inserted == 1)
+        Ok(())
+    }
+
+    /// Marks a claimed send as gone out.
+    pub fn mark_sent(&self, user: &str, device_id: &str, key: &str) -> anyhow::Result<()> {
+        self.conn.locked().execute(
+            "UPDATE sent_client_ids SET done = 1
+             WHERE user = ?1 AND device_id = ?2 AND client_id = ?3",
+            params![user, device_id, key],
+        )?;
+        Ok(())
     }
 
     /// The object an earlier Sync Add with this ClientId created.
@@ -186,12 +259,7 @@ impl Store {
     }
 
     /// Frees a ClientId after a failed send, so the device can retry.
-    pub fn release_client_id(
-        &self,
-        user: &str,
-        device_id: &str,
-        client_id: &str,
-    ) -> anyhow::Result<()> {
+    pub fn release_send(&self, user: &str, device_id: &str, client_id: &str) -> anyhow::Result<()> {
         self.conn.locked().execute(
             "DELETE FROM sent_client_ids WHERE user = ?1 AND device_id = ?2 AND client_id = ?3",
             params![user, device_id, client_id],

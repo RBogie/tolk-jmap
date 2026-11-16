@@ -14,6 +14,7 @@ pub mod jscalendar;
 pub mod jscontact;
 pub mod meeting_response;
 pub mod move_items;
+mod outbox;
 pub mod ping;
 pub mod provision;
 pub mod query;

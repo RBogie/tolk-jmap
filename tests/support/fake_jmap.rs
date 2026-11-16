@@ -72,6 +72,11 @@ pub struct Model {
     pub calls: Vec<String>,
     /// Every EmailSubmission created, as sent.
     pub submissions: Vec<Value>,
+    /// The next N submissions are refused (`forbiddenToSend`).
+    pub refuse_submissions: usize,
+    /// The next N requests with a submission are carried out, but answered
+    /// with HTTP 502, as when the answer is lost on the way.
+    pub lose_submission_answers: usize,
     /// Data types this account advertises but does not serve
     /// (`accountNotSupportedByMethod`, as Stalwart answers for a shared
     /// account without shared address books).
@@ -632,6 +637,11 @@ async fn api(
             };
             responses.push(json!([name, result, call_id]));
         }
+        let submitted = responses.iter().any(|r| r[0] == "EmailSubmission/set");
+        if submitted && model.lose_submission_answers > 0 {
+            model.lose_submission_answers -= 1;
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
         (
             responses,
             model.changed_types(&before),
@@ -789,6 +799,9 @@ fn matches(object: &Value, filter: &Value) -> bool {
         "inAddressBook" => object["addressBookIds"][value.as_str().unwrap_or_default()] == true,
         "inCalendar" => object["calendarIds"][value.as_str().unwrap_or_default()] == true,
         "uid" => object["uid"] == *value,
+        "emailIds" => value
+            .as_array()
+            .is_some_and(|ids| ids.contains(&object["emailId"])),
         "after" => object["receivedAt"]
             .as_str()
             .is_none_or(|d| d >= value.as_str().unwrap_or_default()),
@@ -1059,10 +1072,23 @@ fn submission_set(
 ) -> Value {
     let mut created = Map::new();
     let mut submitted: HashMap<String, String> = HashMap::new();
+    let mut not_created = Map::new();
     for (creation_id, spec) in args["create"].as_object().into_iter().flatten() {
         let mut spec = spec.clone();
         if let Some(reference) = spec["emailId"].as_str().and_then(|r| r.strip_prefix('#')) {
             spec["emailId"] = json!(created_ids.get(reference));
+        }
+        if model.refuse_submissions > 0 {
+            model.refuse_submissions -= 1;
+            not_created.insert(creation_id.clone(), json!({ "type": "forbiddenToSend" }));
+            continue;
+        }
+        if model
+            .get("Email", spec["emailId"].as_str().unwrap_or_default())
+            .is_none()
+        {
+            not_created.insert(creation_id.clone(), json!({ "type": "notFound" }));
+            continue;
         }
         model.submissions.push(spec.clone());
         let id = model.insert("EmailSubmission", spec.clone());
@@ -1081,7 +1107,7 @@ fn submission_set(
             model.remove("Email", email);
         }
     }
-    json!({ "accountId": ACCOUNT, "created": created, "notCreated": {} })
+    json!({ "accountId": ACCOUNT, "created": created, "notCreated": not_created })
 }
 
 /// Stores a plain text message in `mailbox` of `m` and returns its id.

@@ -25,7 +25,9 @@ mod mail;
 mod people;
 
 pub use groupware::{AddressBook, Calendar};
-pub use mail::{BodyPart, BodyValue, BodyValues, Email, EmailAddress, EmailMeta, Mailbox};
+pub use mail::{
+    BodyPart, BodyValue, BodyValues, Email, EmailAddress, EmailMeta, Mailbox, Submission,
+};
 pub use people::Person;
 
 const CORE: &str = "urn:ietf:params:jmap:core";
@@ -739,12 +741,6 @@ impl JmapClient {
             .and_then(|core| core["maxObjectsInGet"].as_u64())
             .map_or(500, |n| n as usize)
             .clamp(1, 500)
-    }
-
-    /// Runs method calls in one request and returns each response's name and
-    /// arguments; a method-level error comes back as name `"error"`.
-    async fn call_many(&self, calls: Vec<(&str, Value)>) -> anyhow::Result<Vec<(String, Value)>> {
-        self.request(&[CORE, MAIL, SUBMISSION], calls).await
     }
 
     async fn request(

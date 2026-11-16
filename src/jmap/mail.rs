@@ -90,6 +90,31 @@ pub struct Email {
     pub priority: Option<String>,
 }
 
+/// What became of a message submission.
+#[derive(Debug)]
+pub enum Submission {
+    Sent,
+    /// The server answered and did not send it; the SetError type, when it
+    /// gave one (RFC 8621 section 7.5).
+    Rejected(anyhow::Error, Option<String>),
+    /// No answer: the message may or may not have gone out.
+    Unknown(anyhow::Error),
+}
+
+/// Whether a failed request certainly changed nothing on the JMAP server:
+/// no connection, a request refused as a whole (4xx, RFC 8620 section 3.6),
+/// or a method error other than `serverPartialFail` (section 3.6.2).
+fn never_processed(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<super::MethodError>()
+            .is_some_and(|m| m.error["type"] != "serverPartialFail")
+            || cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|e| e.is_connect() || e.status().is_some_and(|s| s.is_client_error()))
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmailMeta {
@@ -213,16 +238,9 @@ impl JmapClient {
         Ok(serde_json::from_value(args["list"].take())?)
     }
 
-    /// Submits a raw RFC 5322 message for delivery to `rcpt_to`, keeping a
-    /// copy in the Sent mailbox when `keep_copy` is set.
-    pub async fn send_message(
-        &self,
-        raw: Vec<u8>,
-        mail_from: &str,
-        rcpt_to: &[String],
-        keep_copy: bool,
-    ) -> anyhow::Result<()> {
-        let account_id = self.account_id()?;
+    /// Stores a message that is about to be sent in Sent (Drafts without
+    /// one), marked read, and returns its id.
+    pub async fn store_outgoing(&self, raw: Vec<u8>) -> anyhow::Result<String> {
         let mailboxes = self.mailboxes().await?;
         let sent = mailboxes
             .iter()
@@ -233,50 +251,70 @@ impl JmapClient {
                     .find(|m| m.role.as_deref() == Some("drafts"))
             })
             .context("no Sent or Drafts mailbox to store the message in")?;
-        let identity = self.identity_for(mail_from).await?;
-        let blob_id = self.upload(raw, "message/rfc822").await?;
+        self.import_email(raw, &sent.id, &["$seen"]).await
+    }
 
-        let mut submission = json!({
-            "accountId": account_id,
+    /// Submits a stored message with an explicit envelope, so a Bcc header
+    /// never reaches the recipients. An error only for a rejected login.
+    pub async fn submit(
+        &self,
+        email_id: &str,
+        mail_from: &str,
+        rcpt_to: &[String],
+    ) -> anyhow::Result<Submission> {
+        let identity = match self.identity_for(mail_from).await {
+            Ok(identity) => identity,
+            Err(e) if super::is_unauthorized(&e) => return Err(e),
+            Err(e) => return Ok(Submission::Rejected(e, None)),
+        };
+        let args = json!({
+            "accountId": self.account_id()?,
             "create": { "s": {
                 "identityId": identity,
-                "emailId": "#m",
+                "emailId": email_id,
                 "envelope": {
                     "mailFrom": { "email": mail_from },
                     "rcptTo": rcpt_to.iter().map(|r| json!({ "email": r })).collect::<Vec<_>>(),
                 },
             }},
         });
-        if !keep_copy {
-            submission["onSuccessDestroyEmail"] = json!(["#s"]);
+        match self.call("EmailSubmission/set", args).await {
+            Ok(args) if args["created"]["s"].is_object() => Ok(Submission::Sent),
+            Ok(args) => {
+                let failure = &args["notCreated"]["s"];
+                Ok(Submission::Rejected(
+                    anyhow::anyhow!("the server rejected the message: {failure}"),
+                    failure["type"].as_str().map(str::to_owned),
+                ))
+            }
+            Err(e) if super::is_unauthorized(&e) => Err(e),
+            Err(e) if never_processed(&e) => Ok(Submission::Rejected(e, None)),
+            Err(e) => Ok(Submission::Unknown(e)),
         }
-        let responses = self
-            .call_many(vec![
-                (
-                    "Email/import",
-                    json!({
-                        "accountId": account_id,
-                        "emails": { "m": {
-                            "blobId": blob_id,
-                            "mailboxIds": { (sent.id.clone()): true },
-                            "keywords": { "$seen": true },
-                        }},
-                    }),
-                ),
-                ("EmailSubmission/set", submission),
-            ])
+    }
+
+    /// Whether a stored message has been submitted.
+    pub async fn submitted(&self, email_id: &str) -> anyhow::Result<bool> {
+        let args = self
+            .call(
+                "EmailSubmission/query",
+                json!({
+                    "accountId": self.account_id()?,
+                    "filter": { "emailIds": [email_id] },
+                    "limit": 1,
+                }),
+            )
             .await?;
-        for (name, args) in &responses {
-            if name == "error" {
-                bail!("send failed: {args}");
-            }
-            if let Some(failure) = args["notCreated"]
-                .as_object()
-                .and_then(|m| m.values().next())
-            {
-                bail!("{name} rejected the message: {failure}");
-            }
-        }
+        Ok(args["ids"].as_array().is_some_and(|ids| !ids.is_empty()))
+    }
+
+    /// Destroys a message; one that is already gone is no error.
+    pub async fn destroy_email(&self, email_id: &str) -> anyhow::Result<()> {
+        self.set(
+            EMAIL,
+            SetRequest::default().destroy(vec![email_id.to_owned()]),
+        )
+        .await?;
         Ok(())
     }
 
@@ -413,5 +451,26 @@ impl JmapClient {
             bail!("VacationResponse/set rejected: {error}");
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn method_error(kind: &str) -> anyhow::Error {
+        super::super::MethodError {
+            method: "EmailSubmission/set".to_owned(),
+            error: json!({ "type": kind }),
+        }
+        .into()
+    }
+
+    #[test]
+    fn only_certain_failures_count_as_not_sent() {
+        assert!(never_processed(&method_error("forbidden")));
+        // RFC 8620 3.6.2: a partial failure may have changed state.
+        assert!(!never_processed(&method_error("serverPartialFail")));
+        assert!(!never_processed(&anyhow::anyhow!("connection reset")));
     }
 }

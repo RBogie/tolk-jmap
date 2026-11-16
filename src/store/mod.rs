@@ -59,6 +59,7 @@ mod schema;
 mod sync_state;
 
 pub use devices::{DevicePolicy, DeviceRow};
+pub use ids::SendRecord;
 pub use pruning::{Pruned, Retention};
 pub use quarantine::{QuarantinedItem, SyncRepeats};
 use schema::migrate;
@@ -224,7 +225,7 @@ mod tests {
         store
             .save_collection_sync("rob", "new", "7", &snapshot(r#"{"b":1}"#))
             .unwrap();
-        store.claim_client_id("rob", "new", "c1").unwrap();
+        store.claim_send("rob", "new", "c1").unwrap();
         store
             .item_ids("rob", 7, &["a", "b", "prev", "gone"])
             .unwrap();
@@ -267,7 +268,7 @@ mod tests {
                 .is_some()
         );
         assert!(
-            store.claim_client_id("rob", "new", "c1").unwrap(),
+            store.claim_send("rob", "new", "c1").unwrap() == SendRecord::New,
             "ClientId forgotten"
         );
         // Held ("prev" in a previous snapshot) and recent ("b") ids stay.
@@ -330,13 +331,36 @@ mod tests {
     }
 
     #[test]
-    fn client_ids_are_claimed_once() {
+    fn sends_are_claimed_once() {
         let store = Store::open_in_memory().unwrap();
-        assert!(store.claim_client_id("rob", "d1", "c1").unwrap());
-        assert!(!store.claim_client_id("rob", "d1", "c1").unwrap());
-        assert!(store.claim_client_id("rob", "d2", "c1").unwrap());
-        store.release_client_id("rob", "d1", "c1").unwrap();
-        assert!(store.claim_client_id("rob", "d1", "c1").unwrap());
+        assert_eq!(
+            store.claim_send("rob", "d1", "c1").unwrap(),
+            SendRecord::New
+        );
+        assert_eq!(
+            store.claim_send("rob", "d1", "c1").unwrap(),
+            SendRecord::Pending(None)
+        );
+        store.note_send_email("rob", "d1", "c1", "e1").unwrap();
+        assert_eq!(
+            store.send_record("rob", "d1", "c1").unwrap(),
+            Some(SendRecord::Pending(Some("e1".to_owned())))
+        );
+        store.mark_sent("rob", "d1", "c1").unwrap();
+        assert_eq!(
+            store.claim_send("rob", "d1", "c1").unwrap(),
+            SendRecord::Sent
+        );
+        assert_eq!(
+            store.claim_send("rob", "d2", "c1").unwrap(),
+            SendRecord::New
+        );
+        store.release_send("rob", "d1", "c1").unwrap();
+        assert_eq!(
+            store.claim_send("rob", "d1", "c1").unwrap(),
+            SendRecord::New
+        );
+        assert_eq!(store.send_record("rob", "d3", "c1").unwrap(), None);
     }
 
     #[test]
