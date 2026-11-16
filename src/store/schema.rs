@@ -8,6 +8,7 @@ use super::*;
 /// upgrade cleanly.
 pub(super) const MIGRATIONS: &[&str] = &[
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
+    SCHEMA_V9,
 ];
 
 pub(super) const SCHEMA_V1: &str = r#"
@@ -178,6 +179,13 @@ pub(super) const SCHEMA_V8: &str = r#"
 -- The items of the response a device kept rejecting: only these are sent
 -- one at a time while probing.
 ALTER TABLE sync_repeats ADD COLUMN suspects TEXT NOT NULL DEFAULT '[]';
+"#;
+
+pub(super) const SCHEMA_V9: &str = r#"
+-- A send in progress: the message stored for it (email_id) and whether the
+-- submission is known to have gone out (done). Rows from before were sent.
+ALTER TABLE sent_client_ids ADD COLUMN email_id TEXT;
+ALTER TABLE sent_client_ids ADD COLUMN done INTEGER NOT NULL DEFAULT 1;
 "#;
 
 /// Brings the schema to the latest version, backing the database up first

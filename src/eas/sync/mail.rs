@@ -149,11 +149,10 @@ impl ClientCommands<'_> {
                             Err(e) if jmap::is_unauthorized(&e) => return Err(e.into()),
                             Err(e) => {
                                 tracing::warn!(error = format!("{e:#}"), "draft change failed");
-                                responses.push(item_status(
-                                    command.tag,
-                                    server_id,
-                                    status::SERVER_ERROR,
-                                ));
+                                let code = e
+                                    .downcast_ref::<DraftNotSent>()
+                                    .map_or(status::SERVER_ERROR, |d| d.0);
+                                responses.push(item_status(command.tag, server_id, code));
                             }
                         }
                         continue;
@@ -252,8 +251,19 @@ impl ClientCommands<'_> {
         data: &Element,
         snapshot: &mut Snapshot,
     ) -> Result<Element, CommandError> {
-        if let Some((_, response)) = device_changes::repeated_add(self.req, self.folder, client_id)?
+        if let Some((id, response)) =
+            device_changes::repeated_add(self.req, self.folder, client_id)?
         {
+            // A retried send: the draft goes out now, or went out before.
+            if drafts::wants_send(data)
+                && let Some(code) = self.send_draft(&id).await?
+            {
+                return Ok(device_changes::add_status(
+                    client_id,
+                    response.child_text(airsync::ServerId),
+                    code,
+                ));
+            }
             return Ok(response);
         }
         // Drafts are sent from the user's own account; not kept in shared ones.
@@ -283,13 +293,14 @@ impl ClientCommands<'_> {
             .store
             .item_ids(self.req.user, self.folder.id, &[&id])?[&id];
         snapshot.insert(id.clone(), READ);
-        if drafts::wants_send(data)
-            && let Err(e) = drafts::send(self.req, self.jmap, &id).await
-        {
-            tracing::warn!(error = format!("{e:#}"), "draft not sent");
-        }
+        // A failed send is reported; the device's retry of this Add sends
+        // the saved draft.
+        let code = match drafts::wants_send(data) {
+            true => self.send_draft(&id).await?.unwrap_or(status::OK),
+            false => status::OK,
+        };
         let mut response =
-            device_changes::add_status(client_id, Some(&self.folder.server_id(item)), status::OK);
+            device_changes::add_status(client_id, Some(&self.folder.server_id(item)), code);
         if let Some(attachments) = drafts::attachment_references(&saved) {
             response.push(Element::new(airsync::ApplicationData).child(attachments));
         }
@@ -304,10 +315,20 @@ impl ClientCommands<'_> {
         data: &Element,
         snapshot: &mut Snapshot,
     ) -> anyhow::Result<Option<Element>> {
-        let only_send = drafts::wants_send(data)
-            && data
-                .elements()
-                .all(|e| e.tag == crate::wbxml::cp::email2::Send);
+        // A retried send is not edited and sent again: it went out, or the
+        // earlier attempt's outcome is checked first.
+        let earlier = match drafts::wants_send(data) {
+            true => drafts::send_record(self.req, email_id)?,
+            false => None,
+        };
+        if earlier == Some(crate::store::SendRecord::Sent) {
+            return Ok(None);
+        }
+        let only_send = earlier.is_some()
+            || drafts::wants_send(data)
+                && data
+                    .elements()
+                    .all(|e| e.tag == crate::wbxml::cp::email2::Send);
         let (id, attachments) = if only_send {
             (email_id.to_owned(), None)
         } else {
@@ -318,10 +339,26 @@ impl ClientCommands<'_> {
             let attachments = drafts::attachment_references(&saved);
             (saved.id, attachments)
         };
-        if drafts::wants_send(data) {
-            drafts::send(self.req, self.jmap, &id).await?;
+        if drafts::wants_send(data)
+            && let Some(code) = self.send_draft(&id).await?
+        {
+            return Err(DraftNotSent(code).into());
         }
         Ok(attachments)
+    }
+
+    /// Sends a draft; `None` when it went out (now or before), otherwise
+    /// the item status for the device.
+    async fn send_draft(&self, id: &str) -> anyhow::Result<Option<&'static str>> {
+        use crate::eas::outbox::{Outcome, Refusal};
+        Ok(match drafts::send(self.req, self.jmap, id).await? {
+            Outcome::Sent | Outcome::AlreadySent => None,
+            // MS-ASCMD 2.2.2: a draft without (valid) recipients.
+            Outcome::Rejected(Refusal::NoRecipients | Refusal::InvalidRecipients) => {
+                Some(status::INVALID_RECIPIENTS)
+            }
+            Outcome::Rejected(Refusal::Other) | Outcome::Unknown => Some(status::SERVER_ERROR),
+        })
     }
 
     async fn trash_mailbox(&self) -> anyhow::Result<Option<String>> {
@@ -409,3 +446,15 @@ pub(crate) fn record_move(
         },
     )
 }
+
+/// A draft edit that was saved but whose send failed, with the item status.
+#[derive(Debug)]
+struct DraftNotSent(&'static str);
+
+impl std::fmt::Display for DraftNotSent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "draft not sent (status {})", self.0)
+    }
+}
+
+impl std::error::Error for DraftNotSent {}

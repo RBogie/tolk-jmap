@@ -474,6 +474,175 @@ async fn send_mail_submits_once() {
     h.jmap.read(|m| assert_eq!(m.submissions.len(), 1));
 }
 
+fn sent_copies(m: &support::fake_jmap::Model) -> usize {
+    m.all("Email")
+        .into_iter()
+        .filter(|e| e["mailboxIds"]["sent"] == true)
+        .count()
+}
+
+#[tokio::test]
+async fn rejected_sends_leave_nothing_in_sent() {
+    let h = Harness::start().await;
+    let (device, _) = h.ready_device("d1").await;
+    let mime = "From: test@example.com\r\nTo: friend@example.org\r\nSubject: Hi\r\n\r\nHello\r\n";
+    let send = || {
+        Element::new(cm::SendMail)
+            .child(text(cm::ClientId, "c-1"))
+            .child(Element::new(cm::SaveInSentItems))
+            .child(Element::with_opaque(cm::Mime, mime.as_bytes()))
+    };
+    h.jmap.change(|m| m.refuse_submissions = 1);
+    let reply = device.send("SendMail", Some(send())).await;
+    assert_eq!(reply.root().child_text(cm::Status), Some("120"));
+    h.jmap.read(|m| {
+        assert!(m.submissions.is_empty());
+        assert_eq!(sent_copies(m), 0, "no copy that looks sent");
+    });
+
+    // The ClientId is free again: the retry is sent.
+    let retry = device.send("SendMail", Some(send())).await;
+    assert!(retry.body.is_none(), "sent");
+    h.jmap.read(|m| {
+        assert_eq!(m.submissions.len(), 1);
+        assert_eq!(sent_copies(m), 1);
+    });
+}
+
+#[tokio::test]
+async fn a_lost_submission_answer_is_not_sent_twice() {
+    let h = Harness::start().await;
+    let (device, _) = h.ready_device("d1").await;
+    let mime = "From: test@example.com\r\nTo: friend@example.org\r\nSubject: Hi\r\n\r\nHello\r\n";
+    let send = || {
+        Element::new(cm::SendMail)
+            .child(text(cm::ClientId, "c-1"))
+            .child(Element::with_opaque(cm::Mime, mime.as_bytes()))
+    };
+    // The server sends it, but the answer is lost: the device hears "retry
+    // later", and its retry finds the submission instead of sending again.
+    h.jmap.change(|m| m.lose_submission_answers = 1);
+    let reply = device.send("SendMail", Some(send())).await;
+    assert_eq!(reply.root().child_text(cm::Status), Some("111"));
+    h.jmap.read(|m| assert_eq!(m.submissions.len(), 1));
+
+    let retry = device.send("SendMail", Some(send())).await;
+    assert!(retry.body.is_none(), "reported as sent");
+    h.jmap.read(|m| {
+        assert_eq!(m.submissions.len(), 1, "not sent twice");
+        assert_eq!(sent_copies(m), 0, "no SaveInSentItems: no copy kept");
+    });
+    let again = device.send("SendMail", Some(send())).await;
+    assert_eq!(again.root().child_text(cm::Status), Some("118"));
+}
+
+#[tokio::test]
+async fn eas16_failed_draft_sends_are_reported_and_retried() {
+    use tolk::wbxml::cp::email2;
+    let h = Harness::start().await;
+    let (mut device, folders) = h.ready_device("d1").await;
+    device.version = "16.1".to_owned();
+    let drafts = folders.id("Drafts");
+    let initial = device.initial_sync(&drafts).await;
+    let add = || {
+        Element::new(airsync::Commands).child(
+            Element::new(airsync::Add)
+                .child(text(airsync::ClientId, "draft-1"))
+                .child(
+                    Element::new(airsync::ApplicationData)
+                        .child(text(em::To, "friend@example.org"))
+                        .child(text(em::Subject, "Plans"))
+                        .child(Element::new(email2::Send)),
+                ),
+        )
+    };
+    h.jmap.change(|m| m.refuse_submissions = 1);
+    let failed = device.sync(&drafts, &initial.key, Some(add())).await;
+    let (_, _, status, _) = failed.responses[0].clone();
+    assert_eq!(status, "5", "the device hears the send failed");
+    h.jmap.read(|m| {
+        assert!(m.submissions.is_empty());
+        assert_eq!(sent_copies(m), 0);
+    });
+
+    // The device retries the Add: the saved draft is sent, not a new one.
+    let retried = device.sync(&drafts, &initial.key, Some(add())).await;
+    let (_, _, status, _) = retried.responses[0].clone();
+    assert_eq!(status, "1");
+    h.jmap.read(|m| {
+        assert_eq!(m.submissions.len(), 1);
+        let drafts_left = m
+            .all("Email")
+            .into_iter()
+            .filter(|e| e["mailboxIds"]["drafts"] == true)
+            .count();
+        assert_eq!(drafts_left, 0, "the sent draft is gone from Drafts");
+    });
+}
+
+#[tokio::test]
+async fn eas16_a_draft_without_recipients_is_not_sent() {
+    use tolk::wbxml::cp::email2;
+    let h = Harness::start().await;
+    let (mut device, folders) = h.ready_device("d1").await;
+    device.version = "16.1".to_owned();
+    let drafts = folders.id("Drafts");
+    let initial = device.initial_sync(&drafts).await;
+    let add = Element::new(airsync::Commands).child(
+        Element::new(airsync::Add)
+            .child(text(airsync::ClientId, "draft-1"))
+            .child(
+                Element::new(airsync::ApplicationData)
+                    .child(text(em::Subject, "Plans"))
+                    .child(Element::new(email2::Send)),
+            ),
+    );
+    let result = device.sync(&drafts, &initial.key, Some(add)).await;
+    let (_, _, status, _) = result.responses[0].clone();
+    assert_eq!(status, "183", "InvalidRecipients (MS-ASCMD 2.2.2)");
+    h.jmap.read(|m| assert!(m.submissions.is_empty()));
+}
+
+#[tokio::test]
+async fn eas16_a_repeated_draft_send_goes_out_once() {
+    use tolk::wbxml::cp::email2;
+    let h = Harness::start().await;
+    let (mut device, folders) = h.ready_device("d1").await;
+    device.version = "16.1".to_owned();
+    let drafts = folders.id("Drafts");
+    let initial = device.initial_sync(&drafts).await;
+    let add = Element::new(airsync::Commands).child(
+        Element::new(airsync::Add)
+            .child(text(airsync::ClientId, "draft-1"))
+            .child(
+                Element::new(airsync::ApplicationData)
+                    .child(text(em::To, "friend@example.org"))
+                    .child(text(em::Subject, "Plans")),
+            ),
+    );
+    let saved = device.sync(&drafts, &initial.key, Some(add)).await;
+    let (_, _, _, server_id) = saved.responses[0].clone();
+    let send = || {
+        Element::new(airsync::Commands).child(
+            Element::new(airsync::Change)
+                .child(text(airsync::ServerId, server_id.clone()))
+                .child(
+                    Element::new(airsync::ApplicationData)
+                        .child(text(em::To, "friend@example.org"))
+                        .child(text(em::Subject, "Plans, final"))
+                        .child(Element::new(email2::Send)),
+                ),
+        )
+    };
+    let sent = device.sync(&drafts, &saved.key, Some(send())).await;
+    assert!(sent.responses.is_empty(), "{:?}", sent.responses);
+    // The response was lost: the device repeats the same Sync.
+    let repeated = device.sync(&drafts, &saved.key, Some(send())).await;
+    assert!(repeated.responses.is_empty(), "{:?}", repeated.responses);
+    h.jmap
+        .read(|m| assert_eq!(m.submissions.len(), 1, "sent once"));
+}
+
 #[tokio::test]
 async fn contacts_sync_both_ways() {
     let h = Harness::start().await;

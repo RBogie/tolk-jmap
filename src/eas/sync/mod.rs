@@ -53,6 +53,8 @@ mod status {
     pub const HIERARCHY_CHANGED: &str = "12";
     pub const INCOMPLETE_REQUEST: &str = "13";
     pub const INVALID_WAIT: &str = "14";
+    /// A draft to send has no recipients or an invalid one (EAS 16).
+    pub const INVALID_RECIPIENTS: &str = "183";
 }
 
 /// How long a Sync may wait for changes, in seconds (like Ping).

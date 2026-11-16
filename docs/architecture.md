@@ -64,7 +64,7 @@ mail.
 | `collection_view` | Per device and folder: the server side as last seen, with the JMAP state it reflects. |
 | `sync_requests` | The last full Sync request, which empty and partial Syncs repeat. |
 | `ping_params` | The folders and heartbeat of the last Ping, which an empty Ping repeats. |
-| `sent_client_ids`, `client_adds` | ClientIds of sent mail and device Adds, so retries do not send or create twice. |
+| `sent_client_ids`, `client_adds` | Sends (ClientIds and drafts) with the message stored for them and whether they went out, and the ClientIds of device Adds, so retries do not send or create twice (`eas/outbox.rs`). |
 | `sync_repeats`, `quarantine` | Sync loops: a device repeating a SyncKey, and items it keeps failing on. |
 
 Schema changes are migrations in `store/schema.rs`, applied on startup after

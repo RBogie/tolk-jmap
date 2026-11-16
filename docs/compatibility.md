@@ -35,7 +35,7 @@ Tolk speaks Exchange ActiveSync 14.0, 14.1, 16.0 and 16.1 (configurable with `EA
 | Ping | Push through the JMAP EventSource stream; folder changes answer status 7. |
 | ItemOperations | Fetch (attachments, items, search results) and EmptyFolderContents. Move is not supported. |
 | MoveItems | Yes, within mail. |
-| SendMail, SmartReply, SmartForward | Yes; retries with the same ClientId are not sent twice. |
+| SendMail, SmartReply, SmartForward | Yes; retries with the same ClientId are not sent twice, also when the JMAP server's answer to the first attempt was lost (the retry checks whether it went out). A message the server refuses leaves no copy in Sent. |
 | Search | Mailbox (subject and text) and GAL (contacts and correspondents; the Stalwart directory forbids queries). |
 | Find (16.1) | Mailbox (free text, one folder or with DeepTraversal its subfolders, or everything) and GAL (at least four characters). Results carry ServerIds that ItemOperations, SmartReply and SmartForward accept. Pictures are not returned. |
 | MeetingResponse | Accept, tentative and decline, sent by the JMAP server. |

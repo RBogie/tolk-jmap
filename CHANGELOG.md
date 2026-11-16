@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- Failed sends:
+  - A message the JMAP server refuses no longer leaves a copy in Sent.
+  - When the server's answer to a send is lost, the device is told to try
+    again later, and its retry checks whether the message went out instead
+    of sending it a second time.
+  - A draft sent with a Sync Add (EAS 16) that fails is reported to the
+    device instead of as sent, and the device's retry sends it. A repeated
+    draft send that already went out is not sent again.
+  - A refusal for missing or invalid recipients gets its own status
+    (SendMail 119 or 116, a draft send 183) instead of a general failure.
 - The warning for a login without a JMAP mail account no longer blames
   OAuth when the login was a password (for example an app password limited
   to IMAP and SMTP).
