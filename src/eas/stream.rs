@@ -32,6 +32,8 @@ pub enum Encoding {
 pub struct Download {
     pub response: reqwest::Response,
     pub encoding: Encoding,
+    /// Only part of the body: (bytes to skip, bytes to write).
+    pub window: Option<(u64, u64)>,
 }
 
 /// The downloads a response streams, in [`Node::Stream`] order.
@@ -41,8 +43,31 @@ pub struct Downloads(Mutex<Vec<Download>>);
 impl Downloads {
     /// Registers a download; the node goes where its text belongs.
     pub fn add(&self, response: reqwest::Response, encoding: Encoding) -> Node {
+        self.push(Download {
+            response,
+            encoding,
+            window: None,
+        })
+    }
+
+    /// Registers the `len` bytes of a download after the first `skip`.
+    pub fn add_window(
+        &self,
+        response: reqwest::Response,
+        encoding: Encoding,
+        skip: u64,
+        len: u64,
+    ) -> Node {
+        self.push(Download {
+            response,
+            encoding,
+            window: Some((skip, len)),
+        })
+    }
+
+    fn push(&self, download: Download) -> Node {
         let mut downloads = self.0.locked();
-        downloads.push(Download { response, encoding });
+        downloads.push(download);
         Node::Stream(downloads.len() - 1)
     }
 
@@ -64,7 +89,11 @@ pub fn length(chunks: &[Chunk], downloads: &[Download]) -> Option<u64> {
                         if download.encoding != Encoding::Base64 {
                             return None;
                         }
-                        download.response.content_length()?.div_ceil(3) * 4
+                        let len = match download.window {
+                            Some((_, len)) => len,
+                            None => download.response.content_length()?,
+                        };
+                        len.div_ceil(3) * 4
                     }
                 },
         )
@@ -189,8 +218,13 @@ pub fn body(
                         let missing = std::io::Error::other(format!("stream {n} is missing"));
                         return Some((Err(missing), state));
                     };
+                    let bytes = download.response.bytes_stream();
+                    let bytes = match download.window {
+                        Some((skip, len)) => window(bytes, skip, len).boxed(),
+                        None => bytes.boxed(),
+                    };
                     state.current = Some(Current {
-                        bytes: download.response.bytes_stream().boxed(),
+                        bytes,
                         encoding: download.encoding,
                         carry: Vec::new(),
                     });
@@ -200,9 +234,57 @@ pub fn body(
     })
 }
 
+/// The `len` bytes of `bytes` after the first `skip`; it ends there, so the
+/// rest is not read.
+fn window<S, E>(bytes: S, skip: u64, len: u64) -> impl Stream<Item = Result<Bytes, E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+{
+    futures_util::stream::unfold(
+        (bytes, skip, len),
+        |(mut bytes, mut skip, mut len)| async move {
+            while len > 0 {
+                let mut chunk = match bytes.next().await? {
+                    Ok(chunk) => chunk,
+                    Err(e) => return Some((Err(e), (bytes, skip, 0))),
+                };
+                let skipped = skip.min(chunk.len() as u64);
+                skip -= skipped;
+                let _ = chunk.split_to(skipped as usize);
+                let kept = len.min(chunk.len() as u64);
+                chunk.truncate(kept as usize);
+                len -= kept;
+                if !chunk.is_empty() {
+                    return Some((Ok(chunk), (bytes, skip, len)));
+                }
+            }
+            None
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn windowed(chunks: &[&'static [u8]], skip: u64, len: u64) -> Vec<u8> {
+        let source = futures_util::stream::iter(
+            chunks
+                .iter()
+                .map(|c| Ok::<_, std::convert::Infallible>(Bytes::from_static(c)))
+                .collect::<Vec<_>>(),
+        );
+        let parts: Vec<_> = window(source, skip, len).collect().await;
+        parts.into_iter().flat_map(|p| p.unwrap()).collect()
+    }
+
+    #[tokio::test]
+    async fn window_skips_and_stops_across_chunks() {
+        assert_eq!(windowed(&[b"abc", b"def", b"ghi"], 2, 5).await, b"cdefg");
+        assert_eq!(windowed(&[b"abc", b"def"], 0, 3).await, b"abc");
+        assert_eq!(windowed(&[b"abc"], 1, 10).await, b"bc", "short body");
+        assert_eq!(windowed(&[b"abc"], 5, 2).await, b"", "past the end");
+    }
 
     fn text(chunks: &[&[u8]]) -> Vec<u8> {
         let mut current = Current {

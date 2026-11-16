@@ -135,13 +135,24 @@ async fn send(
 
     // The original and the client for its account (it may be in a shared
     // mailbox); the message itself is always sent from the user's account.
-    let (original, source) = if kind == Kind::Send || body.find(cm::ReplaceMime).is_some() {
-        (None, std::borrow::Cow::Borrowed(jmap))
-    } else {
-        match source_email(req, jmap, query, body).await? {
-            Some((original, source)) => (Some(original), source),
+    // With <ReplaceMime> the device's MIME is complete, so the original is
+    // only needed to mark it as answered or forwarded.
+    let target = match kind {
+        Kind::Send => None,
+        _ => source_target(req, jmap, query, body)?,
+    };
+    let original = match &target {
+        _ if kind == Kind::Send || body.find(cm::ReplaceMime).is_some() => None,
+        None => return Ok(Some(status::SOURCE_NOT_FOUND)),
+        Some((email_id, source)) => match source
+            .get_emails(&[email_id.as_str()], BodyValues::Both, 0)
+            .await?
+            .into_iter()
+            .next()
+        {
+            Some(original) => Some(original),
             None => return Ok(Some(status::SOURCE_NOT_FOUND)),
-        }
+        },
     };
     let raw = match &original {
         None => strip_bcc(mime),
@@ -153,6 +164,9 @@ async fn send(
                         continue;
                     };
                     let name = part.name.clone().unwrap_or_else(|| "attachment".to_owned());
+                    let Some((_, source)) = &target else {
+                        continue;
+                    };
                     let data = source.download(blob_id, &name, &part.mime_type).await?;
                     attachments.push((part.mime_type.clone(), name, data));
                 }
@@ -187,7 +201,7 @@ async fn send(
     }
     tracing::info!(?kind, recipients = recipients.len(), "message sent");
 
-    if let Some(original) = original {
+    if let Some((email_id, source)) = target {
         let keyword = if kind == Kind::Reply {
             "$answered"
         } else {
@@ -196,7 +210,7 @@ async fn send(
         let mut patch = Map::new();
         patch.insert(format!("keywords/{keyword}"), Value::Bool(true));
         let mut update = Map::new();
-        update.insert(original.id.clone(), Value::Object(patch));
+        update.insert(email_id, Value::Object(patch));
         if let Err(e) = source
             .set(
                 crate::jmap::EMAIL,
@@ -210,14 +224,14 @@ async fn send(
     Ok(None)
 }
 
-/// The email a SmartReply or SmartForward refers to, with both bodies, and
-/// the client for its account.
-async fn source_email<'a>(
+/// The id of the email a SmartReply or SmartForward refers to, and the
+/// client for its account; `None` when the source cannot be found.
+fn source_target<'a>(
     req: &Request<'_>,
     jmap: &'a JmapClient,
     query: &EasQuery,
     body: &Element,
-) -> Result<Option<(Email, std::borrow::Cow<'a, JmapClient>)>, CommandError> {
+) -> Result<Option<(String, std::borrow::Cow<'a, JmapClient>)>, CommandError> {
     let source = body.find(cm::Source);
     // A message found by Search is referenced by its LongId (`folder:item`).
     let long_id = source.and_then(|s| s.child_text(cm::LongId));
@@ -239,13 +253,7 @@ async fn source_email<'a>(
     let Some(email_id) = folder.email_for(req, item_id)? else {
         return Ok(None);
     };
-    let client = folder.client(jmap);
-    let email = client
-        .get_emails(&[email_id.as_str()], BodyValues::Both, 0)
-        .await?
-        .into_iter()
-        .next();
-    Ok(email.map(|email| (email, client)))
+    Ok(Some((email_id, folder.client(jmap))))
 }
 
 /// Every To, Cc and Bcc address, once each.

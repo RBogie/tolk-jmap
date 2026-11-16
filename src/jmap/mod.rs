@@ -74,6 +74,13 @@ pub const CALENDAR_EVENT: DataType = DataType {
 /// How long the people collected for recipient lookup are reused.
 const PEOPLE_TTL: Duration = Duration::from_secs(15 * 60);
 
+/// The limit for one JMAP call (session, API request, upload).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest wait for the next bytes of any response. Downloads have no
+/// limit beyond this: they stream to the device at its pace. Above the
+/// event stream's 60 second ping interval.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// Per user: when the known people were collected, and the list.
 /// Values per key that expire after a while; at most 10,000 keys.
 struct TtlCache<V> {
@@ -283,7 +290,8 @@ impl JmapPool {
             .collect();
         Ok(Self {
             http: crate::http_client()
-                .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(IDLE_TIMEOUT)
                 .build()?,
             default,
             by_domain,
@@ -421,6 +429,7 @@ impl JmapPool {
     ) -> Result<Session, AuthError> {
         let response = forwarded_for(self.http.get(&server.session_url), client_ip)
             .credentials(creds)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| AuthError::Backend(e.into()))?;
@@ -764,6 +773,7 @@ impl JmapClient {
         let response: Response =
             forwarded_for(self.http.post(&self.session.api_url), self.client_ip)
                 .credentials(&self.creds)
+                .timeout(REQUEST_TIMEOUT)
                 .json(&body)
                 .send()
                 .await?
@@ -923,6 +933,7 @@ impl JmapClient {
             .replace("{accountId}", &encode_component(self.account_for(MAIL)?));
         let uploaded: Uploaded = forwarded_for(self.http.post(url), self.client_ip)
             .credentials(&self.creds)
+            .timeout(REQUEST_TIMEOUT)
             .header(reqwest::header::CONTENT_TYPE, mime_type)
             .body(data)
             .send()
