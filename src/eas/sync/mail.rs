@@ -77,6 +77,9 @@ pub(super) struct ClientCommands<'a> {
     pub(super) folder: &'a Folder,
     pub(super) body: &'a BodyPreference,
     pub(super) deletes_as_moves: bool,
+    /// The device's `<Conflict>0</Conflict>`: its flag changes win over the
+    /// server's (MS-ASCMD 2.2.3.34).
+    pub(super) client_wins: bool,
 }
 
 /// A device change that was sent to JMAP and awaits its result.
@@ -102,6 +105,7 @@ impl ClientCommands<'_> {
         let mut pending = Vec::new();
         let mut fetches = Vec::new();
         let mut trash: Option<Option<String>> = None;
+        let current = self.current_flags(commands).await?;
 
         for command in commands.elements() {
             if command.tag == airsync::Add {
@@ -155,6 +159,19 @@ impl ClientCommands<'_> {
                                 responses.push(item_status(command.tag, server_id, code));
                             }
                         }
+                        continue;
+                    }
+                    // Flags the server changed since the device was sent
+                    // them: a conflict, the server's flags win.
+                    if let (Some(held), Some(now)) =
+                        (snapshot.get(&email_id), current.get(&email_id))
+                        && held != now
+                    {
+                        tracing::info!(
+                            email = email_id,
+                            "device flag change conflicts with a server change; the server's flags win"
+                        );
+                        responses.push(item_status(command.tag, server_id, status::CONFLICT));
                         continue;
                     }
                     let mut flags = snapshot.get(&email_id).copied().unwrap_or(0);
@@ -242,6 +259,38 @@ impl ClientCommands<'_> {
             responses.extend(self.fetch(&fetches).await?);
         }
         Ok(responses)
+    }
+
+    /// The server's current flags of the messages whose flags the commands
+    /// change, for the conflict check; empty when the device wins conflicts.
+    async fn current_flags(
+        &self,
+        commands: &Element,
+    ) -> anyhow::Result<std::collections::HashMap<String, u64>> {
+        if self.client_wins {
+            return Ok(Default::default());
+        }
+        let mut ids = Vec::new();
+        for command in commands.elements().filter(|c| c.tag == airsync::Change) {
+            let flag_change = command.find(airsync::ApplicationData).is_some_and(|data| {
+                !(self.req.version >= crate::eas::v16::VERSION && drafts::is_draft_edit(data))
+            });
+            let server_id = command.child_text(airsync::ServerId).unwrap_or_default();
+            if flag_change && let Some(id) = self.folder.email_for(self.req, server_id)? {
+                ids.push(id);
+            }
+        }
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        Ok(self
+            .jmap
+            .email_meta(&ids)
+            .await?
+            .into_iter()
+            .map(|m| (m.id, view::flags(&m.keywords)))
+            .collect())
     }
 
     /// A draft the device created; the Add's `<Responses>` entry.

@@ -49,6 +49,7 @@ mod status {
     pub const PROTOCOL_ERROR: &str = "4";
     pub const SERVER_ERROR: &str = "5";
     pub const CONVERSION_ERROR: &str = "6";
+    pub const CONFLICT: &str = "7";
     pub const OBJECT_NOT_FOUND: &str = "8";
     pub const HIERARCHY_CHANGED: &str = "12";
     pub const INCOMPLETE_REQUEST: &str = "13";
@@ -83,6 +84,10 @@ pub struct SyncOptions {
     /// sent with SyncKey 0), as tag names; `None` when it sent none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported: Option<Vec<String>>,
+    /// `<Conflict>`: 0 when the device's change wins a conflict; absent or
+    /// 1, the server's (MS-ASCMD 2.2.3.34).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<u8>,
 }
 
 impl SyncOptions {
@@ -95,6 +100,7 @@ impl SyncOptions {
             filter_type: parse(options.child_text(airsync::FilterType)).unwrap_or(0),
             body_preferences: body_preferences(options),
             supported: None,
+            conflict: parse(options.child_text(airsync::Conflict)),
         })
     }
 
@@ -545,6 +551,7 @@ async fn sync_collection(
                         folder: &folder,
                         body: &body,
                         deletes_as_moves,
+                        client_wins: options.conflict == Some(0),
                     };
                     responses = ctx.apply(commands, &mut snapshot).await?;
                 }
@@ -555,9 +562,15 @@ async fn sync_collection(
                         options.supported.as_deref(),
                         req.caps.contact_picture_max_bytes,
                     );
-                    let applied =
-                        device_changes::apply(req, &folder, commands, &mut kind, &mut snapshot)
-                            .await?;
+                    let applied = device_changes::apply(
+                        req,
+                        &folder,
+                        commands,
+                        &mut kind,
+                        &mut snapshot,
+                        options.conflict == Some(0),
+                    )
+                    .await?;
                     responses = applied.responses;
                     touched = applied.touched;
                 }
@@ -569,9 +582,15 @@ async fn sync_collection(
                         &body,
                         options.supported.as_deref(),
                     );
-                    let applied =
-                        device_changes::apply(req, &folder, commands, &mut kind, &mut snapshot)
-                            .await?;
+                    let applied = device_changes::apply(
+                        req,
+                        &folder,
+                        commands,
+                        &mut kind,
+                        &mut snapshot,
+                        options.conflict == Some(0),
+                    )
+                    .await?;
                     responses = applied.responses;
                     touched = applied.touched;
                 }

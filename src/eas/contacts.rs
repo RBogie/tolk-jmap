@@ -150,6 +150,8 @@ pub(super) struct ContactChanges<'a> {
     supported: Option<&'a [String]>,
     /// The cards being changed: a Change only writes what differs.
     current: Vec<Value>,
+    /// Their versions, from the cards as stored (see [`version`]).
+    versions: std::collections::HashMap<String, u64>,
     max_picture: usize,
 }
 
@@ -165,6 +167,7 @@ impl<'a> ContactChanges<'a> {
             address_book,
             supported,
             current: Vec::new(),
+            versions: std::collections::HashMap::new(),
             max_picture,
         }
     }
@@ -178,6 +181,10 @@ impl Kind for ContactChanges<'_> {
                 .jmap
                 .get_objects(crate::jmap::CONTACT_CARD, ids)
                 .await?;
+            self.versions = cards
+                .iter()
+                .filter_map(|c| Some((c["id"].as_str()?.to_owned(), version(c, self.max_picture))))
+                .collect();
             self.current = with_photos(self.jmap, cards).await;
         }
         Ok(())
@@ -210,6 +217,10 @@ impl Kind for ContactChanges<'_> {
         } else {
             Patch::Apply(patch)
         }
+    }
+
+    fn current_version(&self, id: &str) -> Option<u64> {
+        self.versions.get(id).copied()
     }
 
     async fn writable(&self) -> anyhow::Result<bool> {

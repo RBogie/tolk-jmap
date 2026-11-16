@@ -295,14 +295,42 @@ impl Device {
         commands: Option<Element>,
         window: usize,
     ) -> SyncResult {
+        self.sync_with(collection, key, commands, window, None)
+            .await
+    }
+
+    /// A Sync whose Options carry `<Conflict>` (0: the device wins).
+    pub async fn sync_conflict(
+        &self,
+        collection: &str,
+        key: &str,
+        commands: Option<Element>,
+        conflict: &str,
+    ) -> SyncResult {
+        self.sync_with(collection, key, commands, 100, Some(conflict))
+            .await
+    }
+
+    async fn sync_with(
+        &self,
+        collection: &str,
+        key: &str,
+        commands: Option<Element>,
+        window: usize,
+        conflict: Option<&str>,
+    ) -> SyncResult {
         let mut c = Element::new(airsync::Collection)
             .child(text(airsync::SyncKey, key))
             .child(text(airsync::CollectionId, collection));
         if key != "0" {
             c.push(Element::new(airsync::GetChanges));
             c.push(text(airsync::WindowSize, window.to_string()));
+            let mut options = Element::new(airsync::Options);
+            if let Some(conflict) = conflict {
+                options.push(text(airsync::Conflict, conflict));
+            }
             c.push(
-                Element::new(airsync::Options).child(
+                options.child(
                     Element::new(airsyncbase::BodyPreference)
                         .child(text(airsyncbase::Type, "1"))
                         .child(text(airsyncbase::TruncationSize, "500")),

@@ -811,6 +811,244 @@ async fn calendar_changes_without_a_body_keep_the_description() {
     h.jmap.read(|m| assert!(event(m)["description"].is_null()));
 }
 
+/// A contact card the device has synced, with its folder, key and ServerId.
+async fn synced_card(
+    device: &support::Device,
+    folders: &support::Folders,
+) -> (String, String, String) {
+    let contacts = folders.id("Contacts");
+    let initial = device.initial_sync(&contacts).await;
+    let server_id = initial.add_ids()[0].clone();
+    (contacts, initial.key, server_id)
+}
+
+fn ada() -> serde_json::Value {
+    json!({
+        "@type": "Card",
+        "version": "1.0",
+        "uid": "urn:uuid:c1",
+        "addressBookIds": { "ab1": true },
+        "name": { "components": [
+            { "kind": "given", "value": "Ada" },
+            { "kind": "surname", "value": "Lovelace" },
+        ] },
+        "emails": { "e1": { "address": "ada@example.org" } },
+    })
+}
+
+/// A device Change of Ada that adds a mobile number to what it was shown.
+fn add_mobile(server_id: &str) -> Element {
+    Element::new(airsync::Commands).child(
+        Element::new(airsync::Change)
+            .child(text(airsync::ServerId, server_id))
+            .child(
+                Element::new(airsync::ApplicationData)
+                    .child(text(ct::FirstName, "Ada"))
+                    .child(text(ct::LastName, "Lovelace"))
+                    .child(text(ct::Email1Address, "ada@example.org"))
+                    .child(text(ct::MobilePhoneNumber, "+31 6 1")),
+            ),
+    )
+}
+
+#[tokio::test]
+async fn conflicting_changes_keep_the_server_version() {
+    let h = Harness::start().await;
+    let id = h.jmap.change(|m| m.insert("ContactCard", ada()));
+    let (device, folders) = h.ready_device("d1").await;
+    let (contacts, key, server_id) = synced_card(&device, &folders).await;
+    // The card gets a second address on the server; the device has not seen
+    // it when it changes the card (MS-ASCMD 2.2.3.34: the server wins).
+    h.jmap.change(|m| {
+        m.patch(
+            "ContactCard",
+            &id,
+            json!({ "emails/e2": { "address": "ada@work.example" } })
+                .as_object()
+                .unwrap(),
+        );
+    });
+    let result = device
+        .sync(&contacts, &key, Some(add_mobile(&server_id)))
+        .await;
+    assert_eq!(result.responses[0].2, "7", "{:?}", result.responses);
+    h.jmap.read(|m| {
+        let card = m.get("ContactCard", &id).unwrap();
+        assert_eq!(card["emails"]["e2"]["address"], "ada@work.example", "kept");
+        assert!(
+            card["phones"].is_null(),
+            "the device's change was discarded"
+        );
+    });
+    // The server's version goes to the device in the same response.
+    assert_eq!(result.changes.len(), 1);
+    let data = result.changes[0].find(airsync::ApplicationData).unwrap();
+    assert_eq!(data.child_text(ct::Email2Address), Some("ada@work.example"));
+
+    // Now that the device has it, its change goes through.
+    let next = device
+        .sync(&contacts, &result.key, Some(add_mobile(&server_id)))
+        .await;
+    assert!(next.responses.is_empty(), "{:?}", next.responses);
+    h.jmap.read(|m| {
+        let card = m.get("ContactCard", &id).unwrap();
+        assert_eq!(card["phones"].as_object().map(|p| p.len()), Some(1));
+    });
+}
+
+#[tokio::test]
+async fn with_conflict_0_the_device_change_wins() {
+    let h = Harness::start().await;
+    let id = h.jmap.change(|m| m.insert("ContactCard", ada()));
+    let (device, folders) = h.ready_device("d1").await;
+    let (contacts, key, server_id) = synced_card(&device, &folders).await;
+    h.jmap.change(|m| {
+        m.patch(
+            "ContactCard",
+            &id,
+            json!({ "emails/e2": { "address": "ada@work.example" } })
+                .as_object()
+                .unwrap(),
+        );
+    });
+    let result = device
+        .sync_conflict(&contacts, &key, Some(add_mobile(&server_id)), "0")
+        .await;
+    assert!(result.responses.is_empty(), "{:?}", result.responses);
+    h.jmap.read(|m| {
+        let card = m.get("ContactCard", &id).unwrap();
+        assert_eq!(card["phones"].as_object().map(|p| p.len()), Some(1));
+        // The device's version replaced the server's: it had no second address.
+        assert!(card["emails"].get("e2").is_none());
+    });
+}
+
+#[tokio::test]
+async fn a_device_delete_wins_a_conflict() {
+    let h = Harness::start().await;
+    let id = h.jmap.change(|m| m.insert("ContactCard", ada()));
+    let (device, folders) = h.ready_device("d1").await;
+    let (contacts, key, server_id) = synced_card(&device, &folders).await;
+    h.jmap.change(|m| {
+        m.patch(
+            "ContactCard",
+            &id,
+            json!({ "emails/e2": { "address": "ada@work.example" } })
+                .as_object()
+                .unwrap(),
+        );
+    });
+    let delete = Element::new(airsync::Commands)
+        .child(Element::new(airsync::Delete).child(text(airsync::ServerId, server_id)));
+    let result = device.sync(&contacts, &key, Some(delete)).await;
+    assert!(result.responses.is_empty(), "{:?}", result.responses);
+    h.jmap
+        .read(|m| assert!(m.get("ContactCard", &id).is_none()));
+}
+
+#[tokio::test]
+async fn conflicting_flag_changes_keep_the_server_flags() {
+    let h = Harness::start().await;
+    let id = h.jmap.add_email("inbox", "Plans", "Friday?");
+    let (device, folders) = h.ready_device("d1").await;
+    let inbox = folders.id("Inbox");
+    let initial = device.initial_sync(&inbox).await;
+    let server_id = initial.add_ids()[0].clone();
+    // Flagged in webmail; the phone marks it read before it has synced that.
+    let flag_on_server = |m: &mut support::fake_jmap::Model| {
+        m.patch(
+            "Email",
+            &id,
+            json!({ "keywords/$flagged": true }).as_object().unwrap(),
+        );
+    };
+    h.jmap.change(flag_on_server);
+    let mark_read = || {
+        Element::new(airsync::Commands).child(
+            Element::new(airsync::Change)
+                .child(text(airsync::ServerId, server_id.clone()))
+                .child(Element::new(airsync::ApplicationData).child(text(em::Read, "1"))),
+        )
+    };
+    let result = device.sync(&inbox, &initial.key, Some(mark_read())).await;
+    assert_eq!(result.responses[0].2, "7", "{:?}", result.responses);
+    h.jmap.read(|m| {
+        let email = m.get("Email", &id).unwrap();
+        assert_eq!(email["keywords"]["$flagged"], true);
+        assert!(
+            email["keywords"].get("$seen").is_none(),
+            "the phone's read was discarded"
+        );
+    });
+    // The server's flags go to the device in the same response.
+    assert_eq!(result.changes.len(), 1);
+    let data = result.changes[0].find(airsync::ApplicationData).unwrap();
+    assert_eq!(data.child_text(em::Read), Some("0"));
+
+    // With <Conflict>0</Conflict> the phone's change wins.
+    h.jmap.change(|m| {
+        m.patch(
+            "Email",
+            &id,
+            json!({ "keywords/$flagged": null }).as_object().unwrap(),
+        );
+    });
+    let won = device
+        .sync_conflict(&inbox, &result.key, Some(mark_read()), "0")
+        .await;
+    assert!(won.responses.is_empty(), "{:?}", won.responses);
+    h.jmap
+        .read(|m| assert_eq!(m.get("Email", &id).unwrap()["keywords"]["$seen"], true));
+}
+
+#[tokio::test]
+async fn conflicting_event_changes_keep_the_server_version() {
+    let h = Harness::start().await;
+    let id = h.jmap.change(|m| {
+        m.insert(
+            "CalendarEvent",
+            json!({
+                "@type": "Event",
+                "uid": "ev1@example.org",
+                "calendarIds": { "cal1": true },
+                "title": "Standup",
+                "start": "2026-11-02T09:00:00",
+                "timeZone": "Etc/UTC",
+                "duration": "PT15M",
+            }),
+        )
+    });
+    let (device, folders) = h.ready_device("d1").await;
+    let calendar = folders.id("Calendar");
+    let initial = device.initial_sync(&calendar).await;
+    let server_id = initial.add_ids()[0].clone();
+    h.jmap.change(|m| {
+        m.patch(
+            "CalendarEvent",
+            &id,
+            json!({ "title": "Daily standup" }).as_object().unwrap(),
+        );
+    });
+    let change = Element::new(airsync::Commands).child(
+        Element::new(airsync::Change)
+            .child(text(airsync::ServerId, server_id))
+            .child(
+                Element::new(airsync::ApplicationData)
+                    .child(text(cal::Subject, "Standup"))
+                    .child(text(cal::StartTime, "20261102T100000Z"))
+                    .child(text(cal::EndTime, "20261102T101500Z")),
+            ),
+    );
+    let result = device.sync(&calendar, &initial.key, Some(change)).await;
+    assert_eq!(result.responses[0].2, "7", "{:?}", result.responses);
+    h.jmap.read(|m| {
+        let event = m.get("CalendarEvent", &id).unwrap();
+        assert_eq!(event["title"], "Daily standup");
+        assert_eq!(event["start"], "2026-11-02T09:00:00");
+    });
+    assert_eq!(result.changes.len(), 1, "the server's version is sent back");
+}
+
 #[tokio::test]
 async fn lost_change_history_resyncs_without_losing_items() {
     let h = Harness::start().await;
@@ -1882,7 +2120,8 @@ async fn eas16_calendar_uses_locations_and_instance_ids() {
         Some("20261109T170000Z")
     );
     let server_id = initial.add_ids()[0].clone();
-    // A note on one occurrence, which EAS cannot show.
+    // A note on one occurrence, which EAS cannot show; the device syncs
+    // the change (otherwise its change below is a conflict).
     h.jmap.change(|m| {
         m.patch(
             "CalendarEvent",
@@ -1892,6 +2131,8 @@ async fn eas16_calendar_uses_locations_and_instance_ids() {
                 .unwrap(),
         );
     });
+    let synced = device.sync(&calendar, &initial.key, None).await;
+    assert_eq!(synced.changes.len(), 1);
 
     // Move one occurrence an hour later, delete another.
     let commands = Element::new(airsync::Commands)
@@ -1910,7 +2151,7 @@ async fn eas16_calendar_uses_locations_and_instance_ids() {
                 .child(text(airsync::ServerId, server_id))
                 .child(text(base::InstanceId, "20261123T170000Z")),
         );
-    let result = device.sync(&calendar, &initial.key, Some(commands)).await;
+    let result = device.sync(&calendar, &synced.key, Some(commands)).await;
     assert_eq!(result.status, "1");
     assert!(result.responses.is_empty(), "{:?}", result.responses);
     h.jmap.read(|m| {

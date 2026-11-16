@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Conflicting changes (MS-ASCMD 2.2.3.34): a Change for a contact, event
+  or message (read and flag state) that the server changed since the device
+  last received it no longer overwrites the server's version. The device gets status 7 and the
+  server's version, unless it asked for `<Conflict>0</Conflict>`. A Delete
+  still wins.
 - Attachment and message downloads to the device are no longer cut off
   after 30 seconds on a slow connection: they only fail when the JMAP
   server sends nothing for 90 seconds. Other JMAP calls keep their
