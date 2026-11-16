@@ -254,7 +254,15 @@ pub fn parse_eas_timezone(blob: &str) -> Option<Tz> {
     found
 }
 
-fn match_timezone(blob: &str) -> Option<Tz> {
+/// Whether two `TIME_ZONE_INFORMATION` blobs describe the same offsets and
+/// transitions, whatever their names say (iOS sends a zone back without
+/// names).
+pub fn same_zone(a: &str, b: &str) -> bool {
+    a.trim() == b.trim() || matches!((blob_zone(a), blob_zone(b)), (Some(a), Some(b)) if a == b)
+}
+
+/// A blob's offsets and transition rules.
+fn blob_zone(blob: &str) -> Option<Zone> {
     let bytes = STANDARD
         .decode(blob.trim())
         .ok()
@@ -268,18 +276,11 @@ fn match_timezone(blob: &str) -> Option<Tz> {
         hour: word(at + 8),
         minute: word(at + 10),
     };
-    let name: String = char::decode_utf16((0..32).map(|i| word(4 + i * 2)).take_while(|u| *u != 0))
-        .filter_map(Result::ok)
-        .collect();
-    if let Ok(tz) = name.parse::<Tz>() {
-        return Some(tz);
-    }
-    // Biases beyond a day are garbage (and would overflow below).
     let bias = |at: usize| Some(i32_at(at)).filter(|b| b.unsigned_abs() <= 24 * 60);
     let standard_minutes = -bias(0)?;
     let daylight_bias = bias(168)?;
     let (standard_start, daylight_start) = (rule_at(68), rule_at(152));
-    let target = Zone {
+    Some(Zone {
         standard_minutes,
         daylight: (daylight_start.month != 0).then(|| {
             (
@@ -288,7 +289,23 @@ fn match_timezone(blob: &str) -> Option<Tz> {
                 standard_start,
             )
         }),
-    };
+    })
+}
+
+fn match_timezone(blob: &str) -> Option<Tz> {
+    let bytes = STANDARD
+        .decode(blob.trim())
+        .ok()
+        .filter(|b| b.len() >= 172)?;
+    let word = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+    let name: String = char::decode_utf16((0..32).map(|i| word(4 + i * 2)).take_while(|u| *u != 0))
+        .filter_map(Result::ok)
+        .collect();
+    if let Ok(tz) = name.parse::<Tz>() {
+        return Some(tz);
+    }
+    // Biases beyond a day are garbage (and would overflow); no zone then.
+    let target = blob_zone(blob)?;
     if target
         == (Zone {
             standard_minutes: 0,

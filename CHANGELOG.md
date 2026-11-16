@@ -9,6 +9,13 @@
   last received it no longer overwrites the server's version. The device gets status 7 and the
   server's version, unless it asked for `<Conflict>0</Conflict>`. A Delete
   still wins.
+- Editing an event on a device only writes what it changed. A field sent
+  back as the device was shown it stays as it is, so an edit on the phone
+  no longer turns several reminders or locations into one, `secret` into
+  `private`, a recurrence rule EAS cannot express (EAS 14) into a single
+  event, or the event's time zone into another name with the same rules.
+  A truncated description sent back unchanged is no longer cut either.
+- Cancelled meetings reach the device as cancelled (MeetingStatus 5 or 7).
 - Attachment and message downloads to the device are no longer cut off
   after 30 seconds on a slow connection: they only fail when the JMAP
   server sends nothing for 90 seconds. Other JMAP calls keep their
