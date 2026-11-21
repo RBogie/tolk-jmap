@@ -15,7 +15,7 @@ provision | expect Status=1
 foldersync 0 | folder 8 organizer_calendar
 sync $organizer_calendar 0 | save SyncKey okey
 sync $organizer_calendar $okey 512 | save SyncKey okey
-add-event $organizer_calendar $okey "A10 scenario $run" 20261120T100000Z 30 $user1 | expect Status=1
+add-event $organizer_calendar $okey "A10 scenario $run" $next_weekT100000Z 30 $user1 | expect Status=1
 
 login $user1 $password1
 sync $inbox $key | save SyncKey key | within "Subject~A10 scenario $run" | item MeetingRequest invite | retry 120

@@ -66,7 +66,7 @@ pub fn backup_if_due(state: &AppState, backups: &Backups) -> anyhow::Result<()> 
     if due {
         let name = format!(
             "state-{}.sqlite",
-            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+            jiff::Timestamp::now().strftime("%Y%m%d-%H%M%S")
         );
         let path = backups.dir.join(name);
         state.store.backup(&path)?;

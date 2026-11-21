@@ -10,7 +10,6 @@
 use std::collections::HashSet;
 
 use super::tz;
-use chrono::Utc;
 
 use serde_json::{Map, Value, json};
 
@@ -68,7 +67,7 @@ fn split_attendees(data: &Element) -> (Element, Element) {
 /// Sets the `DtStamp` of a Change to now, so the device sees it as newer
 /// than what it has.
 pub(super) fn stamp_now(data: &mut Element) {
-    let now = tz::compact(Utc::now());
+    let now = tz::compact(jiff::Timestamp::now());
     data.children
         .retain(|n| !matches!(n, wbxml::Node::Element(e) if e.tag == cal::DtStamp));
     data.children.insert(

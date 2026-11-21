@@ -323,8 +323,8 @@ pub fn window_days(filter_type: u8, max_days: Option<u32>) -> Option<u32> {
 pub fn window_start(days: Option<u32>) -> Option<String> {
     let days = i64::from(days?);
     Some(
-        (chrono::Utc::now() - chrono::Duration::days(days))
-            .format("%Y-%m-%dT%H:%M:%SZ")
+        (jiff::Timestamp::now() - super::tz::days(days))
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
             .to_string(),
     )
 }
@@ -379,8 +379,8 @@ mod tests {
     fn windows_follow_the_filter_type() {
         assert!(window_start(filter_days(0)).is_none());
         let week = window_start(filter_days(3)).unwrap();
-        let expected = (chrono::Utc::now() - chrono::Duration::days(7))
-            .format("%Y-%m-%d")
+        let expected = (jiff::Timestamp::now() - crate::eas::tz::days(7))
+            .strftime("%Y-%m-%d")
             .to_string();
         assert!(week.starts_with(&expected), "{week}");
     }

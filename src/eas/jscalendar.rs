@@ -11,13 +11,12 @@
 //! Recurrence rules EAS cannot express (hourly, several rules, BYSETPOS)
 //! are dropped and the event shows as a single occurrence.
 
-use chrono::{DateTime, Datelike, Duration, NaiveDateTime, NaiveTime, TimeZone, Utc};
-use chrono_tz::Tz;
+use jiff::{SignedDuration as Duration, Timestamp, civil::DateTime};
 use serde_json::{Map, Value, json};
 
 use super::{
     email::{self, BodyPreference, body_type},
-    tz,
+    tz::{self, Tz, local_in},
 };
 use crate::wbxml::{
     Element, Tag,
@@ -50,34 +49,27 @@ impl Timing {
     fn of(event: &Value) -> Self {
         let all_day = event["showWithoutTime"] == true;
         Self {
-            tz: event["timeZone"]
-                .as_str()
-                .and_then(|name| name.parse().ok()),
+            tz: event["timeZone"].as_str().and_then(tz::zone_named),
             all_day,
             duration: event["duration"]
                 .as_str()
                 .and_then(tz::parse_duration)
-                .unwrap_or(if all_day {
-                    Duration::days(1)
-                } else {
-                    Duration::zero()
-                }),
+                .unwrap_or(if all_day { tz::days(1) } else { Duration::ZERO }),
         }
     }
 
     /// Start and end in UTC for a local start; all-day events span whole
     /// days from local midnight.
-    fn span(&self, start: NaiveDateTime, duration: Duration) -> (DateTime<Utc>, DateTime<Utc>) {
+    fn span(&self, start: DateTime, duration: Duration) -> (Timestamp, Timestamp) {
+        let tz = self.tz.as_ref();
         if self.all_day {
-            let day = start.date().and_time(NaiveTime::MIN);
-            let days = duration.num_days().max(1);
-            (
-                tz::to_utc(day, self.tz),
-                tz::to_utc(day + Duration::days(days), self.tz),
-            )
+            let day = start.date().at(0, 0, 0, 0);
+            let days = (duration.as_secs() / 86_400).max(1);
+            let last = day.checked_add(tz::days(days)).unwrap_or(day);
+            (tz::to_utc(day, tz), tz::to_utc(last, tz))
         } else {
-            let begin = tz::to_utc(start, self.tz);
-            (begin, begin + duration)
+            let begin = tz::to_utc(start, tz);
+            (begin, begin.checked_add(duration).unwrap_or(begin))
         }
     }
 }
@@ -88,11 +80,11 @@ pub fn to_eas(event: &Value, body: &BodyPreference, own_email: &str) -> Element 
     let mut data = Element::new(airsync::ApplicationData);
     let timing = Timing::of(event);
     let start = event["start"].as_str().and_then(tz::parse_local);
-    let year = start.map_or_else(|| Utc::now().year(), |s| s.year().max(Utc::now().year()));
+    let year = event_year(start);
 
     data.push(Element::with_text(
         cal::TimeZone,
-        tz::eas_timezone(timing.tz, year),
+        tz::eas_timezone(timing.tz.as_ref(), year),
     ));
     data.push(Element::with_text(
         cal::AllDayEvent,
@@ -280,10 +272,15 @@ fn body_element(text: &str, pref: &BodyPreference) -> Element {
     body.child(Element::with_text(airsyncbase::Data, data))
 }
 
-fn utc_timestamp(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|t| t.with_timezone(&Utc))
+/// The year whose time zone rules describe an event: its start's, or this
+/// year for an event that started earlier.
+fn event_year(start: Option<DateTime>) -> i32 {
+    let now = i32::from(local_in(Timestamp::now(), None).year());
+    start.map_or(now, |s| i32::from(s.year()).max(now))
+}
+
+fn utc_timestamp(value: &str) -> Option<Timestamp> {
+    value.parse().ok()
 }
 
 fn location(event: &Value) -> Option<&str> {
@@ -309,7 +306,7 @@ fn reminder_minutes(event: &Value) -> Option<i64> {
             return None;
         }
         let offset = tz::parse_duration(trigger["offset"].as_str()?)?;
-        (offset <= Duration::zero()).then(|| -offset.num_minutes())
+        (offset <= Duration::ZERO).then(|| -offset.as_mins())
     })
 }
 
@@ -365,7 +362,7 @@ fn weekday_bit(day: &str) -> Option<u32> {
 }
 
 /// The single recurrence rule as an EAS `<Recurrence>`, if EAS can say it.
-fn recurrence(event: &Value, start: NaiveDateTime, timing: &Timing) -> Option<Element> {
+fn recurrence(event: &Value, start: DateTime, timing: &Timing) -> Option<Element> {
     let rule = match (&event["recurrenceRule"], &event["recurrenceRules"]) {
         (rule @ Value::Object(_), _) => rule,
         (_, Value::Array(rules)) if rules.len() == 1 => &rules[0],
@@ -392,8 +389,8 @@ fn recurrence(event: &Value, start: NaiveDateTime, timing: &Timing) -> Option<El
         .as_array()
         .and_then(|m| m.first())
         .and_then(|m| m.as_str()?.trim_end_matches('L').parse::<u32>().ok())
-        .unwrap_or(start.month());
-    let start_bit = 1 << start.weekday().num_days_from_sunday();
+        .unwrap_or(u32::from(start.month().unsigned_abs()));
+    let start_bit = 1 << start.weekday().to_sunday_zero_offset();
 
     let mut fields: Vec<(crate::wbxml::Tag, String)> = Vec::new();
     let kind = match rule["frequency"].as_str()? {
@@ -455,7 +452,7 @@ fn recurrence(event: &Value, start: NaiveDateTime, timing: &Timing) -> Option<El
     } else if let Some(until) = rule["until"].as_str().and_then(tz::parse_local) {
         recurrence.push(Element::with_text(
             cal::Until,
-            tz::compact(tz::to_utc(until, timing.tz)),
+            tz::compact(tz::to_utc(until, timing.tz.as_ref())),
         ));
     }
     for (tag, value) in fields {
@@ -510,7 +507,7 @@ pub fn meeting_request(event: &Value) -> Element {
     use crate::wbxml::cp::{email as e, email2 as e2};
     let timing = Timing::of(event);
     let start = event["start"].as_str().and_then(tz::parse_local);
-    let year = start.map_or_else(|| Utc::now().year(), |s| s.year().max(Utc::now().year()));
+    let year = event_year(start);
     let mut request = Element::new(e::MeetingRequest).child(Element::with_text(
         e::AllDayEvent,
         if timing.all_day { "1" } else { "0" },
@@ -571,7 +568,7 @@ pub fn meeting_request(event: &Value) -> Element {
     ));
     request.push(Element::with_text(
         e::TimeZone,
-        tz::eas_timezone(timing.tz, year),
+        tz::eas_timezone(timing.tz.as_ref(), year),
     ));
     if let Some(uid) = event["uid"].as_str() {
         request.push(Element::with_text(e::GlobalObjId, global_obj_id(uid)));
@@ -582,8 +579,8 @@ pub fn meeting_request(event: &Value) -> Element {
 }
 
 /// EAS email dates: `2026-11-05T13:00:00.000Z`.
-fn extended(time: DateTime<Utc>) -> String {
-    time.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+fn extended(time: Timestamp) -> String {
+    time.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
 /// A calendar `<Recurrence>` with the email page's tags, as a meeting
@@ -673,32 +670,21 @@ pub const MANAGED: &[&str] = &[
 
 /// An EAS date-time: compact (`20261101T140000Z`) or extended
 /// (`2026-11-01T14:00:00.000Z`).
-fn parse_eas_time(value: &str) -> Option<DateTime<Utc>> {
+fn parse_eas_time(value: &str) -> Option<Timestamp> {
     let value = value.trim();
-    NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ")
+    DateTime::strptime("%Y%m%dT%H%M%SZ", value)
         .ok()
-        .map(|t| Utc.from_utc_datetime(&t))
-        .or_else(|| {
-            DateTime::parse_from_rfc3339(value)
-                .ok()
-                .map(|t| t.with_timezone(&Utc))
-        })
+        .map(|t| tz::to_utc(t, None))
+        .or_else(|| utc_timestamp(value))
 }
 
-fn local_in(time: DateTime<Utc>, tz: Option<Tz>) -> NaiveDateTime {
-    match tz {
-        Some(tz) => time.with_timezone(&tz).naive_local(),
-        None => time.naive_utc(),
-    }
-}
-
-fn local_string(time: NaiveDateTime) -> String {
-    time.format("%Y-%m-%dT%H:%M:%S").to_string()
+fn local_string(time: DateTime) -> String {
+    time.strftime("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
 /// An ISO 8601 duration such as `PT1H30M` or `P2D`.
 fn format_duration(duration: Duration) -> String {
-    let total = duration.num_seconds().max(0);
+    let total = duration.as_secs().max(0);
     let (days, rest) = (total / 86_400, total % 86_400);
     let (hours, minutes, seconds) = (rest / 3600, rest % 3600 / 60, rest % 60);
     let mut out = String::from("P");
@@ -722,24 +708,24 @@ fn format_duration(duration: Duration) -> String {
 
 /// Start, duration and all-day flag in the event's zone, from UTC times.
 fn timing_from_eas(
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    tz: Option<Tz>,
+    start: Timestamp,
+    end: Timestamp,
+    tz: Option<&Tz>,
     all_day: bool,
-) -> (NaiveDateTime, Duration) {
+) -> (DateTime, Duration) {
     let (local_start, local_end) = (local_in(start, tz), local_in(end, tz));
     if all_day {
         let first = local_start.date();
         // A start just before local midnight is a device rounding issue.
-        let first = if local_start.time() >= NaiveTime::from_hms_opt(12, 0, 0).unwrap() {
-            first.succ_opt().unwrap_or(first)
+        let first = if local_start.hour() >= 12 {
+            first.tomorrow().unwrap_or(first)
         } else {
             first
         };
-        let days = (local_end.date() - first).num_days().max(1);
-        (first.and_time(NaiveTime::MIN), Duration::days(days))
+        let days = (local_end.date().duration_since(first).as_secs() / 86_400).max(1);
+        (first.at(0, 0, 0, 0), tz::days(days))
     } else {
-        (local_start, end - start)
+        (local_start, end.duration_since(start))
     }
 }
 
@@ -761,13 +747,16 @@ pub fn from_eas(data: &Element) -> Map<String, Value> {
     // two meanings in local time; keep such an event in UTC to stay exact.
     if !all_day
         && let Some(start) = text(cal::StartTime).and_then(parse_eas_time)
-        && tz::to_utc(local_in(start, tz), tz) != start
+        && tz::to_utc(local_in(start, tz.as_ref()), tz.as_ref()) != start
     {
         tz = None;
     }
     event.insert(
         "timeZone".to_owned(),
-        tz.map_or("Etc/UTC", |tz| tz.name()).into(),
+        tz.as_ref()
+            .and_then(Tz::iana_name)
+            .unwrap_or("Etc/UTC")
+            .into(),
     );
     event.insert("showWithoutTime".to_owned(), all_day.into());
     event.insert(
@@ -779,17 +768,17 @@ pub fn from_eas(data: &Element) -> Map<String, Value> {
         text(cal::StartTime).and_then(parse_eas_time),
         text(cal::EndTime).and_then(parse_eas_time),
     ) {
-        let (local_start, duration) = timing_from_eas(start, end, tz, all_day);
+        let (local_start, duration) = timing_from_eas(start, end, tz.as_ref(), all_day);
         event.insert("start".to_owned(), local_string(local_start).into());
         event.insert("duration".to_owned(), format_duration(duration).into());
         if let Some(recurrence) = data.find(cal::Recurrence) {
             event.insert(
                 "recurrenceRule".to_owned(),
-                recurrence_from_eas(recurrence, tz).unwrap_or(Value::Null),
+                recurrence_from_eas(recurrence, tz.as_ref()).unwrap_or(Value::Null),
             );
         }
         if let Some(exceptions) = data.find(cal::Exceptions) {
-            let overrides = overrides_from_eas(exceptions, tz, all_day);
+            let overrides = overrides_from_eas(exceptions, tz.as_ref(), all_day);
             if !overrides.is_empty() {
                 event.insert("recurrenceOverrides".to_owned(), Value::Object(overrides));
             }
@@ -812,7 +801,7 @@ pub fn from_eas(data: &Element) -> Map<String, Value> {
         event.insert(
             "alerts".to_owned(),
             json!({ "a1": { "@type": "Alert", "action": "display",
-                "trigger": { "@type": "OffsetTrigger", "offset": format!("-{}", format_duration(Duration::minutes(minutes))) } } }),
+                "trigger": { "@type": "OffsetTrigger", "offset": format!("-{}", format_duration(Duration::from_mins(minutes))) } } }),
         );
     }
     event.insert(
@@ -1003,7 +992,7 @@ fn same_timing(a: &Element, b: &Element) -> bool {
 }
 
 /// An EAS `<Recurrence>` as a JSCalendar recurrence rule.
-fn recurrence_from_eas(recurrence: &Element, tz: Option<Tz>) -> Option<Value> {
+fn recurrence_from_eas(recurrence: &Element, tz: Option<&Tz>) -> Option<Value> {
     let number = |tag| {
         recurrence
             .child_text(tag)
@@ -1100,13 +1089,13 @@ pub fn occurrence_override(
         }
     }
     let exceptions = Element::new(cal::Exceptions).child(exception);
-    overrides_from_eas(&exceptions, timing.tz, timing.all_day)
+    overrides_from_eas(&exceptions, timing.tz.as_ref(), timing.all_day)
         .into_iter()
         .next()
 }
 
 /// EAS `<Exceptions>` as JSCalendar `recurrenceOverrides`.
-fn overrides_from_eas(exceptions: &Element, tz: Option<Tz>, all_day: bool) -> Map<String, Value> {
+fn overrides_from_eas(exceptions: &Element, tz: Option<&Tz>, all_day: bool) -> Map<String, Value> {
     let mut overrides = Map::new();
     for exception in exceptions.find_all(cal::Exception) {
         let Some(original) = exception
@@ -1511,10 +1500,10 @@ mod tests {
 
     #[test]
     fn formats_durations() {
-        assert_eq!(format_duration(Duration::minutes(90)), "PT1H30M");
-        assert_eq!(format_duration(Duration::days(2)), "P2D");
-        assert_eq!(format_duration(Duration::hours(25)), "P1DT1H");
-        assert_eq!(format_duration(Duration::zero()), "PT0S");
+        assert_eq!(format_duration(Duration::from_mins(90)), "PT1H30M");
+        assert_eq!(format_duration(tz::days(2)), "P2D");
+        assert_eq!(format_duration(Duration::from_hours(25)), "P1DT1H");
+        assert_eq!(format_duration(Duration::ZERO), "PT0S");
     }
 
     #[test]
@@ -1662,7 +1651,7 @@ mod tests {
         let data = Element::new(airsync::ApplicationData)
             .child(Element::with_text(
                 cal::TimeZone,
-                tz::eas_timezone(Some(chrono_tz::America::New_York), 2026),
+                tz::eas_timezone(tz::zone_named("America/New_York").as_ref(), 2026),
             ))
             .child(Element::with_text(cal::Subject, "Late"))
             .child(Element::with_text(cal::StartTime, "20261101T060000Z"))
@@ -1694,12 +1683,12 @@ mod tests {
             ) {
                 let subject = subject.trim().to_owned();
                 prop_assume!(!subject.is_empty());
-                let tz: Tz = zone.parse().unwrap();
-                let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
-                    + Duration::minutes(15 * start_minutes);
-                let end = start + Duration::minutes(15 * length_quarters);
+                let tz = tz::zone_named(zone).unwrap();
+                let start = tz::to_utc(jiff::civil::date(2026, 1, 1).at(0, 0, 0, 0), None)
+                    + Duration::from_mins(15 * start_minutes);
+                let end = start + Duration::from_mins(15 * length_quarters);
                 let mut data = Element::new(airsync::ApplicationData)
-                    .child(Element::with_text(cal::TimeZone, tz::eas_timezone(Some(tz), 2026)))
+                    .child(Element::with_text(cal::TimeZone, tz::eas_timezone(Some(&tz), 2026)))
                     .child(Element::with_text(cal::AllDayEvent, "0"))
                     .child(Element::with_text(cal::Subject, subject.as_str()))
                     .child(Element::with_text(cal::StartTime, tz::compact(start)))

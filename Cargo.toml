@@ -21,8 +21,6 @@ path = "src/main.rs"
 anyhow = "1"
 axum = "0.8"
 base64 = "0.23"
-chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
-chrono-tz = "0.10.4"
 form_urlencoded = "1"
 mail-builder = "2.0.0"
 mail-parser = "1.0.0"
@@ -37,6 +35,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 zeroize = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+jiff = { version = "1.0.1", default-features = false, features = ["std", "tz-fat", "tzdb-bundle-always", "perf-inline"] }
 
 # musl's own allocator is slow for a multi-threaded server; the static
 # release builds use mimalloc instead.

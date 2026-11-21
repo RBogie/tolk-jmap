@@ -2,8 +2,20 @@
 
 ## Unreleased
 
+### Changed
+
+- Dates and time zones are handled with jiff instead of chrono and
+  chrono-tz, which RustSec lists as unmaintained (RUSTSEC-2026-0543 and
+  RUSTSEC-2026-0555). The binary carries jiff's copy of the time zone
+  database (2026f), so it still needs no zoneinfo files.
+
 ### Fixed
 
+- Time zones that change for good during a year, as Alberta, British
+  Columbia, Manitoba and Cuba do in 2026 by keeping daylight time, reach the
+  device with the offset they have from then on. EAS describes a zone as
+  one offset or a yearly switch to daylight time and back, which cannot say
+  "once".
 - Contacts:
   - Car, radio, assistant, company main and MMS phones, the assistant,
     manager and children, the Yomi (phonetic) names and the office location
