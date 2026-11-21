@@ -768,7 +768,7 @@ impl LoopCheck {
             quarantined: req.store.quarantined(user, device, collection_id)?,
             starting: false,
         };
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let state = &mut check.state;
         let same = check.stored && state.sync_key == key && now - state.last_at < LOOP_GAP;
         state.repeats = match (check.retry, same) {
@@ -834,7 +834,7 @@ impl LoopCheck {
             return self.forget(req, collection_id);
         }
         state.sync_key = key;
-        state.last_at = chrono::Utc::now().timestamp();
+        state.last_at = jiff::Timestamp::now().as_second();
         state.sent = if state.probing { sent } else { Vec::new() };
         self.stored = true;
         req.store

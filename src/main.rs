@@ -220,8 +220,8 @@ fn devices(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn time(at: i64) -> String {
-    chrono::DateTime::from_timestamp(at, 0)
-        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+    jiff::Timestamp::from_second(at)
+        .map(|t| t.strftime("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_default()
 }
 

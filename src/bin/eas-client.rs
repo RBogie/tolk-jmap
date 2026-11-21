@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! eas-client --url https://mail.example.com --user me@example.com \
-//!     --password-file ~/pw.txt [--device probe1] <command> [args]
+//!     --password-file ~/pw.txt [--device probe1] [--eas-version 16.1] <command> [args]
 //!
 //! commands:
 //!   provision                         both policy phases; caches the policy key
@@ -37,7 +37,10 @@
 //!   sendmail <to> <subject> [body]
 //!   smartreply <collection> <server-id> <to> <body> [replace-mime]
 //!                                     replace-mime sends <ReplaceMime/>, as iOS
-//!   meeting-response <collection> <request-id> <1|2|3>   accept/tentative/decline
+//!   meeting-response <collection> <request-id> <1|2|3> [instance-id] [send]
+//!                                     accept/tentative/decline, of one
+//!                                     occurrence (InstanceId, or - for the
+//!                                     series); send adds <SendResponse/>
 //!   search-gal <query>
 //!   scenario <file>                   runs a scenario (see below)
 //! ```
@@ -64,6 +67,7 @@
 //! <Tag>=<value>` or `~` (later checks only look at the first Add or Change with
 //! that value) and `retry <seconds>` (repeat the step until its checks
 //! pass). Tags match by name, or `Namespace:Name`. `$run` is unique per run;
+//! `$next_week` is the date a week from now (YYYYMMDD);
 //! `$user1`, `$password1`, `$user2` and `$password2` are read from the
 //! environment variables `EAS_USER1`, `EAS_PASSWORD_FILE1` and so on.
 
@@ -207,12 +211,17 @@ async fn run(
             client.send("ItemOperations", Some(body)).await
         }
         "meeting-response" => {
-            let body = Element::new(mr::MeetingResponse).child(
-                Element::new(mr::Request)
-                    .child(text(mr::UserResponse, arg(2, "1|2|3")?))
-                    .child(text(mr::CollectionId, arg(0, "collection")?))
-                    .child(text(mr::RequestId, arg(1, "request-id")?)),
-            );
+            let mut request = Element::new(mr::Request)
+                .child(text(mr::UserResponse, arg(2, "1|2|3")?))
+                .child(text(mr::CollectionId, arg(0, "collection")?))
+                .child(text(mr::RequestId, arg(1, "request-id")?));
+            if let Some(instance) = args.get(3).filter(|i| *i != "-") {
+                request.push(text(mr::InstanceId, instance.clone()));
+            }
+            if args.get(4).is_some_and(|a| a == "send") {
+                request.push(Element::new(mr::SendResponse));
+            }
+            let body = Element::new(mr::MeetingResponse).child(request);
             client.send("MeetingResponse", Some(body)).await
         }
         "edit-event" | "edit-contact" => {
@@ -311,10 +320,12 @@ async fn run(
                 _ => {
                     let start = arg(3, "start")?;
                     let minutes: i64 = arg(4, "minutes")?.parse().context("minutes")?;
-                    let begin = chrono::NaiveDateTime::parse_from_str(&start, "%Y%m%dT%H%M%SZ")
+                    let begin = jiff::civil::DateTime::strptime("%Y%m%dT%H%M%SZ", &start)
                         .context("start must look like 20261105T090000Z")?;
-                    let end = (begin + chrono::Duration::minutes(minutes))
-                        .format("%Y%m%dT%H%M%SZ")
+                    let end = begin
+                        .checked_add(jiff::SignedDuration::from_mins(minutes))
+                        .context("minutes")?
+                        .strftime("%Y%m%dT%H%M%SZ")
                         .to_string();
                     let mut data = Element::new(airsync::ApplicationData)
                         .child(text(cal::Subject, arg(2, "subject")?))
@@ -636,7 +647,15 @@ async fn scenario(first: Client, path: &str) -> anyhow::Result<()> {
     // `$run` is unique per run, for subjects that must not match old runs;
     // `$user1`, `$password1`, `$user2` and `$password2` come from the
     // environment (EAS_USER1, EAS_PASSWORD_FILE1, ...).
-    let mut vars: HashMap<String, String> = HashMap::from([("run".to_owned(), unique_id())]);
+    // `$next_week` is the date a week from now (YYYYMMDD), for events that
+    // must lie in the future (servers send no invitation for a past one).
+    let next_week = (jiff::Timestamp::now() + tolk::eas::tz::days(7))
+        .strftime("%Y%m%d")
+        .to_string();
+    let mut vars: HashMap<String, String> = HashMap::from([
+        ("run".to_owned(), unique_id()),
+        ("next_week".to_owned(), next_week),
+    ]);
     for n in [1, 2] {
         for (var, env) in [("user", "EAS_USER"), ("password", "EAS_PASSWORD_FILE")] {
             if let Ok(value) = std::env::var(format!("{env}{n}")) {
@@ -743,6 +762,7 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     let device = take("--device").unwrap_or_else(|| "easclient1".to_owned());
+    let eas_version = take("--eas-version");
     let password_file = shellexpand(&password_file);
     let password = match std::fs::read_to_string(&password_file) {
         Ok(p) => p.trim().to_owned(),
@@ -759,6 +779,9 @@ async fn main() -> ExitCode {
         .map_or_else(|| PathBuf::from(".eas-client"), PathBuf::from);
     let mut client = Client::new(&url, &user, &password, &device, state_dir);
     client.eas.bearer = bearer;
+    if let Some(version) = eas_version {
+        client.eas.version = version;
+    }
     if command == "scenario" {
         let Some(path) = args.get(1) else {
             eprintln!("missing scenario file");
