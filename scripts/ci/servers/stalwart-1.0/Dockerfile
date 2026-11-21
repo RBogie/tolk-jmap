@@ -1,3 +1,3 @@
 # The Stalwart 1.x release the integration tests run against (Dependabot
 # keeps it current; the integration job reads the FROM line).
-FROM stalwartlabs/stalwart:v1.0.3@sha256:73c684a84c24f5b4206ec266a8deb8986fe44a9f623997e07f084388d943c8bd
+FROM stalwartlabs/stalwart:v1.1.0@sha256:f772aa6ef8cd8018969fa491640f1436b0270eb14e2c219b5f37f1a77020837e
