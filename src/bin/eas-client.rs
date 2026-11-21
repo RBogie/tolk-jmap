@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! eas-client --url https://mail.example.com --user me@example.com \
-//!     --password-file ~/pw.txt [--device probe1] <command> [args]
+//!     --password-file ~/pw.txt [--device probe1] [--eas-version 16.1] <command> [args]
 //!
 //! commands:
 //!   provision                         both policy phases; caches the policy key
@@ -37,7 +37,10 @@
 //!   sendmail <to> <subject> [body]
 //!   smartreply <collection> <server-id> <to> <body> [replace-mime]
 //!                                     replace-mime sends <ReplaceMime/>, as iOS
-//!   meeting-response <collection> <request-id> <1|2|3>   accept/tentative/decline
+//!   meeting-response <collection> <request-id> <1|2|3> [instance-id] [send]
+//!                                     accept/tentative/decline, of one
+//!                                     occurrence (InstanceId, or - for the
+//!                                     series); send adds <SendResponse/>
 //!   search-gal <query>
 //!   scenario <file>                   runs a scenario (see below)
 //! ```
@@ -208,12 +211,17 @@ async fn run(
             client.send("ItemOperations", Some(body)).await
         }
         "meeting-response" => {
-            let body = Element::new(mr::MeetingResponse).child(
-                Element::new(mr::Request)
-                    .child(text(mr::UserResponse, arg(2, "1|2|3")?))
-                    .child(text(mr::CollectionId, arg(0, "collection")?))
-                    .child(text(mr::RequestId, arg(1, "request-id")?)),
-            );
+            let mut request = Element::new(mr::Request)
+                .child(text(mr::UserResponse, arg(2, "1|2|3")?))
+                .child(text(mr::CollectionId, arg(0, "collection")?))
+                .child(text(mr::RequestId, arg(1, "request-id")?));
+            if let Some(instance) = args.get(3).filter(|i| *i != "-") {
+                request.push(text(mr::InstanceId, instance.clone()));
+            }
+            if args.get(4).is_some_and(|a| a == "send") {
+                request.push(Element::new(mr::SendResponse));
+            }
+            let body = Element::new(mr::MeetingResponse).child(request);
             client.send("MeetingResponse", Some(body)).await
         }
         "edit-event" | "edit-contact" => {
@@ -754,6 +762,7 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     let device = take("--device").unwrap_or_else(|| "easclient1".to_owned());
+    let eas_version = take("--eas-version");
     let password_file = shellexpand(&password_file);
     let password = match std::fs::read_to_string(&password_file) {
         Ok(p) => p.trim().to_owned(),
@@ -770,6 +779,9 @@ async fn main() -> ExitCode {
         .map_or_else(|| PathBuf::from(".eas-client"), PathBuf::from);
     let mut client = Client::new(&url, &user, &password, &device, state_dir);
     client.eas.bearer = bearer;
+    if let Some(version) = eas_version {
+        client.eas.version = version;
+    }
     if command == "scenario" {
         let Some(path) = args.get(1) else {
             eprintln!("missing scenario file");

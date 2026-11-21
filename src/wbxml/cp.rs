@@ -111,6 +111,7 @@ code_pages! {
     8 meeting_response "MeetingResponse" {
         0x05 CalendarId, 0x06 CollectionId, 0x07 MeetingResponse, 0x08 RequestId,
         0x09 Request, 0x0A Result, 0x0B Status, 0x0C UserResponse, 0x0E InstanceId,
+        0x10 ProposedStartTime, 0x11 ProposedEndTime, 0x12 SendResponse,
     }
     10 resolve_recipients "ResolveRecipients" {
         0x05 ResolveRecipients, 0x06 Response, 0x07 Status, 0x08 Type, 0x09 Recipient,

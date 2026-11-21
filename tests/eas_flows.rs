@@ -3591,6 +3591,74 @@ fn invitation(uid: &str, status: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn eas16_meeting_responses_send_a_reply_only_when_asked() {
+    use tolk::wbxml::cp::meeting_response as mr;
+    let h = Harness::start().await;
+    h.jmap.change(|m| {
+        let mut event = invitation("plan@example.org", "needs-action");
+        event["calendarIds"] = json!({ "cal1": true });
+        m.insert("CalendarEvent", event)
+    });
+    let (mut device, folders) = h.ready_device("d1").await;
+    device.version = "16.1".to_owned();
+    let calendar = folders.id("Calendar");
+    let initial = device.initial_sync(&calendar).await;
+    let server_id = initial.add_ids()[0].clone();
+
+    // Without <SendResponse>, no reply (MS-ASCMD 2.2.1.11).
+    let reply = device
+        .send(
+            "MeetingResponse",
+            Some(meeting_response(&calendar, &server_id, "1")),
+        )
+        .await;
+    assert_eq!(meeting_result(&reply).0, "1");
+    h.jmap.read(|m| assert!(m.scheduling.is_empty()));
+
+    // With it, the JMAP server is asked to send one.
+    let mut request = meeting_response(&calendar, &server_id, "3");
+    if let Some(tolk::wbxml::Node::Element(r)) = request.children.first_mut() {
+        r.push(Element::new(mr::SendResponse));
+    }
+    let reply = device.send("MeetingResponse", Some(request)).await;
+    assert_eq!(meeting_result(&reply).0, "1");
+    h.jmap.read(|m| assert_eq!(m.scheduling.len(), 1));
+}
+
+#[tokio::test]
+async fn answering_one_occurrence_leaves_the_series() {
+    use tolk::wbxml::cp::meeting_response as mr;
+    let h = Harness::start().await;
+    let event = h.jmap.change(|m| {
+        let mut event = invitation("weekly@example.org", "needs-action");
+        event["calendarIds"] = json!({ "cal1": true });
+        event["recurrenceRule"] =
+            json!({ "@type": "RecurrenceRule", "frequency": "weekly", "count": 4 });
+        m.insert("CalendarEvent", event)
+    });
+    let (mut device, folders) = h.ready_device("d1").await;
+    device.version = "16.1".to_owned();
+    let calendar = folders.id("Calendar");
+    let initial = device.initial_sync(&calendar).await;
+    let server_id = initial.add_ids()[0].clone();
+    // The second occurrence: 19 November, 10:00 in Amsterdam is 09:00 UTC.
+    let mut request = meeting_response(&calendar, &server_id, "3");
+    if let Some(tolk::wbxml::Node::Element(r)) = request.children.first_mut() {
+        r.push(text(mr::InstanceId, "20261119T090000Z"));
+    }
+    let reply = device.send("MeetingResponse", Some(request)).await;
+    assert_eq!(meeting_result(&reply).0, "1");
+    h.jmap.read(|m| {
+        let event = m.get("CalendarEvent", &event).unwrap();
+        assert_eq!(event["participants"]["me"]["participationStatus"], "needs-action");
+        assert_eq!(
+            event["recurrenceOverrides"]["2026-11-19T10:00:00"]["participants/me/participationStatus"],
+            "declined"
+        );
+    });
+}
+
+#[tokio::test]
 async fn meeting_responses_from_the_calendar_set_the_own_status() {
     let h = Harness::start().await;
     let event = h.jmap.change(|m| {
