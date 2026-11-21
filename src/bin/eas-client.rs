@@ -64,6 +64,7 @@
 //! <Tag>=<value>` or `~` (later checks only look at the first Add or Change with
 //! that value) and `retry <seconds>` (repeat the step until its checks
 //! pass). Tags match by name, or `Namespace:Name`. `$run` is unique per run;
+//! `$next_week` is the date a week from now (YYYYMMDD);
 //! `$user1`, `$password1`, `$user2` and `$password2` are read from the
 //! environment variables `EAS_USER1`, `EAS_PASSWORD_FILE1` and so on.
 
@@ -311,10 +312,12 @@ async fn run(
                 _ => {
                     let start = arg(3, "start")?;
                     let minutes: i64 = arg(4, "minutes")?.parse().context("minutes")?;
-                    let begin = chrono::NaiveDateTime::parse_from_str(&start, "%Y%m%dT%H%M%SZ")
+                    let begin = jiff::civil::DateTime::strptime("%Y%m%dT%H%M%SZ", &start)
                         .context("start must look like 20261105T090000Z")?;
-                    let end = (begin + chrono::Duration::minutes(minutes))
-                        .format("%Y%m%dT%H%M%SZ")
+                    let end = begin
+                        .checked_add(jiff::SignedDuration::from_mins(minutes))
+                        .context("minutes")?
+                        .strftime("%Y%m%dT%H%M%SZ")
                         .to_string();
                     let mut data = Element::new(airsync::ApplicationData)
                         .child(text(cal::Subject, arg(2, "subject")?))
@@ -636,7 +639,15 @@ async fn scenario(first: Client, path: &str) -> anyhow::Result<()> {
     // `$run` is unique per run, for subjects that must not match old runs;
     // `$user1`, `$password1`, `$user2` and `$password2` come from the
     // environment (EAS_USER1, EAS_PASSWORD_FILE1, ...).
-    let mut vars: HashMap<String, String> = HashMap::from([("run".to_owned(), unique_id())]);
+    // `$next_week` is the date a week from now (YYYYMMDD), for events that
+    // must lie in the future (servers send no invitation for a past one).
+    let next_week = (jiff::Timestamp::now() + tolk::eas::tz::days(7))
+        .strftime("%Y%m%d")
+        .to_string();
+    let mut vars: HashMap<String, String> = HashMap::from([
+        ("run".to_owned(), unique_id()),
+        ("next_week".to_owned(), next_week),
+    ]);
     for n in [1, 2] {
         for (var, env) in [("user", "EAS_USER"), ("password", "EAS_PASSWORD_FILE")] {
             if let Ok(value) = std::env::var(format!("{env}{n}")) {

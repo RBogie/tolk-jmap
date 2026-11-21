@@ -8,50 +8,68 @@
 
 use crate::LockExt;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use chrono::{
-    DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike, Utc,
+use jiff::{
+    SignedDuration, Timestamp,
+    civil::{self, DateTime},
+    tz::Offset,
 };
-use chrono_tz::Tz;
+
+/// An IANA time zone.
+pub type Tz = jiff::tz::TimeZone;
+
+/// A number of whole days as a duration.
+pub fn days(n: i64) -> SignedDuration {
+    SignedDuration::from_hours(n.saturating_mul(24))
+}
 
 /// EAS compact UTC date-time, e.g. `20261030T100000Z`.
-pub fn compact(time: DateTime<Utc>) -> String {
-    time.format("%Y%m%dT%H%M%SZ").to_string()
+pub fn compact(time: Timestamp) -> String {
+    time.strftime("%Y%m%dT%H%M%SZ").to_string()
 }
 
 /// A JSCalendar LocalDateTime (`2026-10-30T10:00:00`, seconds optional).
-pub fn parse_local(value: &str) -> Option<NaiveDateTime> {
+pub fn parse_local(value: &str) -> Option<DateTime> {
     let value = value.split('.').next()?;
-    NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
-        .or_else(|_| NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M"))
+    DateTime::strptime("%Y-%m-%dT%H:%M:%S", value)
+        .or_else(|_| DateTime::strptime("%Y-%m-%dT%H:%M", value))
         .ok()
 }
 
 /// A local time in `tz` (UTC when floating) as UTC. A time skipped by a
 /// daylight saving jump uses the offset from before the jump (RFC 5545).
-pub fn to_utc(local: NaiveDateTime, tz: Option<Tz>) -> DateTime<Utc> {
+/// Times at the very ends of the supported range are clamped.
+pub fn to_utc(local: DateTime, tz: Option<&Tz>) -> Timestamp {
+    let utc = || Tz::UTC.to_timestamp(local);
     match tz {
-        Some(tz) => match tz.from_local_datetime(&local).earliest() {
-            Some(time) => time.with_timezone(&Utc),
-            None => {
-                // Gaps last a few hours at most, so half a day earlier is before it.
-                let before = local - Duration::hours(12);
-                let offset = tz.offset_from_utc_datetime(&before).fix().local_minus_utc();
-                Utc.from_utc_datetime(&(local - Duration::seconds(i64::from(offset))))
-            }
-        },
-        None => Utc.from_utc_datetime(&local),
+        // "Compatible": a time in a gap moves forward by the gap, so it keeps
+        // the offset from before the jump; a repeated time is the earlier.
+        Some(tz) => tz
+            .to_ambiguous_timestamp(local)
+            .compatible()
+            .or_else(|_| utc()),
+        None => utc(),
     }
+    .unwrap_or(if local.year() < 0 {
+        Timestamp::MIN
+    } else {
+        Timestamp::MAX
+    })
+}
+
+/// The local time of `time` in `tz` (UTC when floating).
+pub fn local_in(time: Timestamp, tz: Option<&Tz>) -> DateTime {
+    tz.unwrap_or(&Tz::UTC).to_datetime(time)
 }
 
 /// An ISO 8601 duration as used by JSCalendar (`PT1H30M`, `P1D`, `-PT15M`).
-pub fn parse_duration(value: &str) -> Option<Duration> {
+pub fn parse_duration(value: &str) -> Option<SignedDuration> {
     let (negative, rest) = match value.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, value.strip_prefix('+').unwrap_or(value)),
     };
     let rest = rest.strip_prefix('P')?;
     let (date, time) = rest.split_once('T').unwrap_or((rest, ""));
-    let mut total = Duration::zero();
+    let mut total = SignedDuration::ZERO;
     for (part, units) in [
         (date, [('W', 7 * 86_400), ('D', 86_400), ('_', 0)]),
         (time, [('H', 3600), ('M', 60), ('S', 1)]),
@@ -64,7 +82,8 @@ pub fn parse_duration(value: &str) -> Option<Duration> {
             }
             let seconds = units.iter().find(|(u, _)| *u == c)?.1;
             let n: f64 = number.parse().ok()?;
-            total += Duration::milliseconds((n * f64::from(seconds) * 1000.0) as i64);
+            let part = SignedDuration::from_millis((n * f64::from(seconds) * 1000.0) as i64);
+            total = total.checked_add(part)?;
             number.clear();
         }
         if !number.is_empty() {
@@ -93,30 +112,25 @@ struct Zone {
     daylight: Option<(i32, Rule, Rule)>,
 }
 
-fn offset_minutes(tz: Tz, at: DateTime<Utc>) -> i32 {
-    tz.offset_from_utc_datetime(&at.naive_utc())
-        .fix()
-        .local_minus_utc()
-        / 60
+fn offset_minutes(tz: &Tz, at: Timestamp) -> i32 {
+    tz.to_offset(at).seconds() / 60
 }
 
-fn zone_rules(tz: Tz, year: i32) -> Zone {
-    let day = |d: i64| {
-        Utc.from_utc_datetime(
-            &NaiveDate::from_ymd_opt(year, 1, 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap(),
-        ) + Duration::days(d)
-    };
+fn zone_rules(tz: &Tz, year: i32) -> Zone {
+    // Years outside what a calendar uses are read as the nearest one.
+    let year = i16::try_from(year.clamp(1, 9998)).unwrap_or(2026);
+    let new_year = Tz::UTC
+        .to_timestamp(civil::date(year, 1, 1).at(0, 0, 0, 0))
+        .unwrap_or(Timestamp::UNIX_EPOCH);
+    let day = |d: i64| new_year + days(d);
     let mut transitions = Vec::new();
     for d in 0..366 {
         let (from, to) = (day(d), day(d + 1));
         if offset_minutes(tz, from) != offset_minutes(tz, to) {
             // Narrow down to the minute.
             let (mut low, mut high) = (from, to);
-            while high - low > Duration::minutes(1) {
-                let mid = low + (high - low) / 2;
+            while high.duration_since(low) > SignedDuration::from_mins(1) {
+                let mid = low + high.duration_since(low) / 2;
                 if offset_minutes(tz, mid) == offset_minutes(tz, low) {
                     low = mid
                 } else {
@@ -130,24 +144,22 @@ fn zone_rules(tz: Tz, year: i32) -> Zone {
         .map(|m| offset_minutes(tz, day(m * 31)))
         .min()
         .unwrap_or(0);
-    let rule_at = |(at, before, _): (DateTime<Utc>, i32, i32)| {
+    let rule_at = |(at, before, _): (Timestamp, i32, i32)| {
         // Windows rules use the local time just before the switch.
-        let local = at.naive_utc() + Duration::minutes(i64::from(before));
-        let days_in_month = NaiveDate::from_ymd_opt(local.year(), local.month() % 12 + 1, 1)
-            .unwrap_or(NaiveDate::from_ymd_opt(local.year() + 1, 1, 1).unwrap())
-            .pred_opt()
-            .map_or(31, |d| if local.month() == 12 { 31 } else { d.day() });
-        let week = if local.day() + 7 > days_in_month {
+        let offset = Offset::from_seconds(before * 60).unwrap_or(Offset::UTC);
+        let local = offset.to_datetime(at);
+        let week = if local.day() + 7 > local.days_in_month() {
             5
         } else {
             (local.day() - 1) / 7 + 1
         };
+        let word = |n: i8| u16::try_from(n).unwrap_or(0);
         Rule {
-            month: local.month() as u16,
-            day_of_week: local.weekday().num_days_from_sunday() as u16,
-            week: week as u16,
-            hour: local.hour() as u16,
-            minute: local.minute() as u16,
+            month: word(local.month()),
+            day_of_week: word(local.weekday().to_sunday_zero_offset()),
+            week: word(week),
+            hour: word(local.hour()),
+            minute: word(local.minute()),
         }
     };
     let to_daylight = transitions.iter().find(|(_, before, after)| after > before);
@@ -156,10 +168,13 @@ fn zone_rules(tz: Tz, year: i32) -> Zone {
         (Some(on), Some(off)) => Some((on.2, rule_at(*on), rule_at(*off))),
         _ => None,
     };
+    // Without a switch to daylight time and back, one offset: the one at the
+    // end of the year, so a zone that changes for good during the year (as
+    // when a region keeps daylight time) is described as it is from then on.
     let standard_minutes = if daylight.is_some() {
         standard_minutes
     } else {
-        offset_minutes(tz, day(0))
+        offset_minutes(tz, day(365))
     };
     Zone {
         standard_minutes,
@@ -169,7 +184,7 @@ fn zone_rules(tz: Tz, year: i32) -> Zone {
 
 /// The base64 `TIME_ZONE_INFORMATION` for `tz` (UTC when `None`), using
 /// the rules in effect in `year`.
-pub fn eas_timezone(tz: Option<Tz>, year: i32) -> String {
+pub fn eas_timezone(tz: Option<&Tz>, year: i32) -> String {
     let zone = tz.map_or(
         Zone {
             standard_minutes: 0,
@@ -177,7 +192,7 @@ pub fn eas_timezone(tz: Option<Tz>, year: i32) -> String {
         },
         |tz| zone_rules(tz, year),
     );
-    let name = tz.map_or("UTC", |tz| tz.name());
+    let name = tz.and_then(Tz::iana_name).unwrap_or("UTC");
     let mut out = Vec::with_capacity(172);
     let push_name = |out: &mut Vec<u8>, name: &str| {
         let mut units: Vec<u16> = name.encode_utf16().take(31).collect();
@@ -241,7 +256,7 @@ pub fn parse_eas_timezone(blob: &str) -> Option<Tz> {
     static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     if let Some(found) = cache.locked().get(blob) {
-        return *found;
+        return found.clone();
     }
     let found = match_timezone(blob);
     let mut cache = cache.locked();
@@ -250,7 +265,7 @@ pub fn parse_eas_timezone(blob: &str) -> Option<Tz> {
     if cache.len() >= 1000 {
         cache.clear();
     }
-    cache.insert(blob.to_owned(), found);
+    cache.insert(blob.to_owned(), found.clone());
     found
 }
 
@@ -292,6 +307,14 @@ fn blob_zone(blob: &str) -> Option<Zone> {
     })
 }
 
+/// The zone with this IANA name from the bundled time zone database.
+pub fn zone_named(name: &str) -> Option<Tz> {
+    if name.is_empty() {
+        return None;
+    }
+    Tz::get(name).ok()
+}
+
 fn match_timezone(blob: &str) -> Option<Tz> {
     let bytes = STANDARD
         .decode(blob.trim())
@@ -301,7 +324,7 @@ fn match_timezone(blob: &str) -> Option<Tz> {
     let name: String = char::decode_utf16((0..32).map(|i| word(4 + i * 2)).take_while(|u| *u != 0))
         .filter_map(Result::ok)
         .collect();
-    if let Ok(tz) = name.parse::<Tz>() {
+    if let Some(tz) = zone_named(&name) {
         return Some(tz);
     }
     // Biases beyond a day are garbage (and would overflow); no zone then.
@@ -314,15 +337,15 @@ fn match_timezone(blob: &str) -> Option<Tz> {
     {
         return None;
     }
-    let year = Utc::now().year();
-    let preferred = PREFERRED.iter().filter_map(|name| name.parse::<Tz>().ok());
-    let all = chrono_tz::TZ_VARIANTS
-        .iter()
-        .copied()
-        .filter(|tz| tz.name().contains('/'));
+    let year = i32::from(local_in(Timestamp::now(), None).year());
+    let preferred = PREFERRED.iter().filter_map(|name| zone_named(name));
+    let all = jiff::tz::db()
+        .available()
+        .filter(|name| name.as_str().contains('/'))
+        .filter_map(|name| zone_named(name.as_str()));
     let found = preferred
         .chain(all)
-        .find(|tz| zone_rules(*tz, year) == target);
+        .find(|tz| zone_rules(tz, year) == target);
     if found.is_none() {
         tracing::warn!(blob, "no time zone matches the device's rules, using UTC");
     }
@@ -332,6 +355,14 @@ fn match_timezone(blob: &str) -> Option<Tz> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn zone(name: &str) -> Tz {
+        zone_named(name).unwrap()
+    }
+
+    fn name(tz: Option<Tz>) -> Option<String> {
+        tz.and_then(|tz| tz.iana_name().map(str::to_owned))
+    }
 
     fn decode(blob: &str) -> Vec<u8> {
         STANDARD.decode(blob).unwrap()
@@ -355,37 +386,43 @@ mod tests {
     /// device sends no usable zone name.
     #[test]
     fn every_zone_survives_a_nameless_round_trip() {
-        use chrono::{Offset, TimeZone};
-        let instants: Vec<DateTime<Utc>> = (1..=12)
+        let instants: Vec<Timestamp> = (1..=12)
             .flat_map(|month| {
-                [1, 15].map(|day| Utc.with_ymd_and_hms(2026, month, day, 12, 0, 0).unwrap())
+                [1, 15].map(|day| to_utc(civil::date(2026, month, day).at(12, 0, 0, 0), None))
             })
             .collect();
-        let offsets = |tz: Tz| -> Vec<i32> {
+        let offsets = |tz: &Tz| -> Vec<i32> {
             instants
                 .iter()
-                .map(|t| {
-                    tz.offset_from_utc_datetime(&t.naive_utc())
-                        .fix()
-                        .local_minus_utc()
-                })
+                .map(|t| tz.to_offset(*t).seconds())
                 .collect()
         };
         let mut failures = Vec::new();
-        for tz in chrono_tz::TZ_VARIANTS {
-            let expected = offsets(tz);
-            // More than two distinct offsets, or switching more than twice
-            // a year (e.g. a Ramadan pause), does not fit the format.
+        let zones = jiff::tz::db().available().collect::<Vec<_>>();
+        assert!(
+            zones.len() > 400,
+            "the bundled database has {} zones",
+            zones.len()
+        );
+        for name in zones {
+            let tz = zone(name.as_str());
+            let expected = offsets(&tz);
+            // Switching more than twice a year (e.g. a Ramadan pause), or
+            // once for good, does not fit the format.
             let switches = expected.windows(2).filter(|w| w[0] != w[1]).count();
-            if switches > 2 {
+            if switches > 2 || expected.first() != expected.last() {
                 continue;
             }
-            let mut blob = STANDARD.decode(eas_timezone(Some(tz), 2026)).unwrap();
+            let mut blob = STANDARD.decode(eas_timezone(Some(&tz), 2026)).unwrap();
             blob[4..68].fill(0);
             blob[88..152].fill(0);
-            let found = parse_eas_timezone(&STANDARD.encode(&blob)).unwrap_or(chrono_tz::UTC);
-            if offsets(found) != expected {
-                failures.push(format!("{} -> {}", tz.name(), found.name()));
+            let found = parse_eas_timezone(&STANDARD.encode(&blob)).unwrap_or(Tz::UTC);
+            if offsets(&found) != expected {
+                failures.push(format!(
+                    "{} -> {}",
+                    name.as_str(),
+                    found.iana_name().unwrap_or("?")
+                ));
             }
         }
         assert!(
@@ -398,26 +435,26 @@ mod tests {
     #[test]
     fn finds_zones_from_device_rules() {
         assert_eq!(
-            parse_eas_timezone(GMAIL_AMSTERDAM),
-            Some(chrono_tz::Europe::Amsterdam)
+            name(parse_eas_timezone(GMAIL_AMSTERDAM)).as_deref(),
+            Some("Europe/Amsterdam")
         );
         // Our own blobs map back to an equivalent zone.
-        for tz in [
-            chrono_tz::America::New_York,
-            chrono_tz::Australia::Sydney,
-            chrono_tz::Asia::Tokyo,
-        ] {
-            let found = parse_eas_timezone(&eas_timezone(Some(tz), 2026));
-            assert_eq!(found.map(|f| f.name()), Some(tz.name()));
+        for tz in ["America/New_York", "Australia/Sydney", "Asia/Tokyo"] {
+            let found = parse_eas_timezone(&eas_timezone(Some(&zone(tz)), 2026));
+            assert_eq!(name(found).as_deref(), Some(tz));
         }
         // Named blobs and UTC.
         assert_eq!(
-            parse_eas_timezone(&eas_timezone(Some(chrono_tz::Europe::Lisbon), 2026)),
-            Some(chrono_tz::Europe::Lisbon)
+            name(parse_eas_timezone(&eas_timezone(
+                Some(&zone("Europe/Lisbon")),
+                2026
+            )))
+            .as_deref(),
+            Some("Europe/Lisbon")
         );
         assert_eq!(
-            parse_eas_timezone(&eas_timezone(None, 2026)),
-            Some(chrono_tz::UTC)
+            name(parse_eas_timezone(&eas_timezone(None, 2026))).as_deref(),
+            Some("UTC")
         );
         assert_eq!(parse_eas_timezone("garbage"), None);
         // Found by fuzzing: an absurd bias must not overflow.
@@ -425,11 +462,14 @@ mod tests {
         absurd[168..172].copy_from_slice(&i32::MIN.to_le_bytes());
         absurd[152 + 2] = 3;
         assert_eq!(parse_eas_timezone(&STANDARD.encode(&absurd)), None);
+        // A name is looked up in the bundled database only.
+        assert_eq!(zone_named(""), None);
+        assert_eq!(zone_named("W. Europe Standard Time"), None);
     }
 
     #[test]
     fn amsterdam_rules() {
-        let blob = decode(&eas_timezone(Some(chrono_tz::Europe::Amsterdam), 2026));
+        let blob = decode(&eas_timezone(Some(&zone("Europe/Amsterdam")), 2026));
         assert_eq!(blob.len(), 172);
         assert_eq!(i32_at(&blob, 0), -60);
         // Standard time starts on the last Sunday of October at 03:00.
@@ -442,7 +482,7 @@ mod tests {
 
     #[test]
     fn new_york_and_utc() {
-        let blob = decode(&eas_timezone(Some(chrono_tz::America::New_York), 2026));
+        let blob = decode(&eas_timezone(Some(&zone("America/New_York")), 2026));
         assert_eq!(i32_at(&blob, 0), 300);
         assert_eq!(rule_at(&blob, 68), [11, 0, 1, 2, 0, 0]);
         assert_eq!(rule_at(&blob, 152), [3, 0, 2, 2, 0, 0]);
@@ -452,43 +492,108 @@ mod tests {
         assert_eq!(rule_at(&utc, 68), [0; 6]);
         assert_eq!(i32_at(&utc, 168), 0);
 
-        let tokyo = decode(&eas_timezone(Some(chrono_tz::Asia::Tokyo), 2026));
+        let tokyo = decode(&eas_timezone(Some(&zone("Asia/Tokyo")), 2026));
         assert_eq!(i32_at(&tokyo, 0), -540);
         assert_eq!(rule_at(&tokyo, 152), [0; 6]);
     }
 
+    /// Regions that keep daylight time from 2026 on (tzdb 2026f) are
+    /// described with the offset they have from then on.
+    #[test]
+    fn a_change_for_good_uses_the_new_offset() {
+        let blob = decode(&eas_timezone(Some(&zone("America/Edmonton")), 2026));
+        assert_eq!(i32_at(&blob, 0), 360);
+        assert_eq!(rule_at(&blob, 152), [0; 6]);
+        assert_eq!(i32_at(&blob, 168), 0);
+        // A year before the change still has both switches.
+        let blob = decode(&eas_timezone(Some(&zone("America/Edmonton")), 2025));
+        assert_eq!(i32_at(&blob, 0), 420);
+        assert_eq!(rule_at(&blob, 152), [3, 0, 2, 2, 0, 0]);
+    }
+
     #[test]
     fn southern_hemisphere_rules() {
-        let blob = decode(&eas_timezone(Some(chrono_tz::Australia::Sydney), 2026));
+        let blob = decode(&eas_timezone(Some(&zone("Australia/Sydney")), 2026));
         assert_eq!(i32_at(&blob, 0), -600);
         assert_eq!(rule_at(&blob, 68), [4, 0, 1, 3, 0, 0]);
         assert_eq!(rule_at(&blob, 152), [10, 0, 1, 2, 0, 0]);
     }
 
     #[test]
+    fn compact_and_local_formats() {
+        let local = parse_local("2026-10-30T10:00").unwrap();
+        assert_eq!(local, civil::date(2026, 10, 30).at(10, 0, 0, 0));
+        assert_eq!(
+            parse_local("2026-10-30T10:00:05.250"),
+            Some(civil::date(2026, 10, 30).at(10, 0, 5, 0))
+        );
+        assert_eq!(parse_local("2026-10-30"), None);
+        assert_eq!(parse_local("2026-10-30T10:00:00Z"), None);
+        assert_eq!(compact(to_utc(local, None)), "20261030T100000Z");
+        assert_eq!(
+            local_in(to_utc(local, None), Some(&zone("Asia/Tokyo"))),
+            civil::date(2026, 10, 30).at(19, 0, 0, 0)
+        );
+        // The first of two repeated hours (end of daylight time).
+        let fold = parse_local("2026-10-25T02:30").unwrap();
+        assert_eq!(
+            compact(to_utc(fold, Some(&zone("Europe/Amsterdam")))),
+            "20261025T003000Z"
+        );
+        // The ends of the range are clamped instead of failing.
+        assert_eq!(
+            to_utc(DateTime::MAX, Some(&zone("Asia/Tokyo"))),
+            to_utc(DateTime::MAX, None)
+        );
+    }
+
+    #[test]
     fn converts_local_times() {
         let local = parse_local("2026-10-30T10:00:00").unwrap();
         assert_eq!(
-            compact(to_utc(local, Some(chrono_tz::Europe::Amsterdam))),
+            compact(to_utc(local, Some(&zone("Europe/Amsterdam")))),
             "20261030T090000Z"
         );
         assert_eq!(compact(to_utc(local, None)), "20261030T100000Z");
         // 02:30 does not exist on 29 March 2026 in Amsterdam.
         let gap = parse_local("2026-03-29T02:30").unwrap();
         assert_eq!(
-            compact(to_utc(gap, Some(chrono_tz::Europe::Amsterdam))),
+            compact(to_utc(gap, Some(&zone("Europe/Amsterdam")))),
             "20260329T013000Z"
         );
     }
 
     #[test]
     fn parses_durations() {
-        assert_eq!(parse_duration("PT1H30M"), Some(Duration::minutes(90)));
-        assert_eq!(parse_duration("P1D"), Some(Duration::days(1)));
-        assert_eq!(parse_duration("P1W"), Some(Duration::days(7)));
-        assert_eq!(parse_duration("-PT15M"), Some(Duration::minutes(-15)));
-        assert_eq!(parse_duration("P1DT2H"), Some(Duration::hours(26)));
-        assert_eq!(parse_duration("PT0S"), Some(Duration::zero()));
+        assert_eq!(
+            parse_duration("PT1H30M"),
+            Some(SignedDuration::from_mins(90))
+        );
+        assert_eq!(parse_duration("P1D"), Some(days(1)));
+        assert_eq!(parse_duration("P1W"), Some(days(7)));
+        assert_eq!(
+            parse_duration("-PT15M"),
+            Some(SignedDuration::from_mins(-15))
+        );
+        assert_eq!(
+            parse_duration("P1DT2H"),
+            Some(SignedDuration::from_hours(26))
+        );
+        assert_eq!(parse_duration("PT0S"), Some(SignedDuration::ZERO));
+        assert_eq!(
+            parse_duration("PT1.5S"),
+            Some(SignedDuration::from_millis(1500))
+        );
         assert_eq!(parse_duration("1H"), None);
+        // Absurd values do not overflow.
+        assert!(
+            parse_duration(&format!(
+                "P{}W{}DT{}H",
+                "9".repeat(30),
+                "9".repeat(30),
+                "9".repeat(30)
+            ))
+            .is_some()
+        );
     }
 }

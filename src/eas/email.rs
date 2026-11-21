@@ -183,8 +183,9 @@ fn conversation_id(thread_id: &str) -> Vec<u8> {
 /// FILETIME, so replies sort after what they answer.
 fn conversation_index(received_at: &str) -> Vec<u8> {
     const FILETIME_UNIX_EPOCH: i64 = 116_444_736_000_000_000;
-    let ticks = chrono::DateTime::parse_from_rfc3339(received_at)
-        .map(|t| FILETIME_UNIX_EPOCH + t.timestamp() * 10_000_000)
+    let ticks = received_at
+        .parse::<jiff::Timestamp>()
+        .map(|t| FILETIME_UNIX_EPOCH + t.as_second() * 10_000_000)
         .unwrap_or(FILETIME_UNIX_EPOCH);
     ticks.to_be_bytes()[1..6].to_vec()
 }

@@ -2989,11 +2989,11 @@ async fn sync_max_age_limits_even_unfiltered_syncs() {
     .await;
     let recent = h.jmap.add_email("inbox", "Recent", "Hi");
     let old = h.jmap.add_email("inbox", "Old", "Hi");
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     h.jmap.change(|m| {
         for (id, age) in [(&recent, 1), (&old, 60)] {
-            let at = (now - chrono::Duration::days(age))
-                .format("%Y-%m-%dT%H:%M:%SZ")
+            let at = (now - tolk::eas::tz::days(age))
+                .strftime("%Y-%m-%dT%H:%M:%SZ")
                 .to_string();
             m.patch(
                 "Email",
