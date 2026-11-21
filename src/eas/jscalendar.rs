@@ -1094,6 +1094,19 @@ pub fn occurrence_override(
         .next()
 }
 
+/// The `recurrenceOverrides` key (local recurrence id) of the occurrence an
+/// EAS InstanceId (its original start in UTC) names.
+pub fn occurrence_key(event: &Value, instance_id: &str) -> Option<String> {
+    let timing = Timing::of(event);
+    let original = parse_eas_time(instance_id)?;
+    let key = if timing.all_day {
+        timing_from_eas(original, original, timing.tz.as_ref(), true).0
+    } else {
+        local_in(original, timing.tz.as_ref())
+    };
+    Some(local_string(key))
+}
+
 /// EAS `<Exceptions>` as JSCalendar `recurrenceOverrides`.
 fn overrides_from_eas(exceptions: &Element, tz: Option<&Tz>, all_day: bool) -> Map<String, Value> {
     let mut overrides = Map::new();

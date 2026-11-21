@@ -72,6 +72,9 @@ pub struct Model {
     pub calls: Vec<String>,
     /// Every EmailSubmission created, as sent.
     pub submissions: Vec<Value>,
+    /// The arguments of every `CalendarEvent/set` that asked the server to
+    /// send scheduling messages (`sendSchedulingMessages`).
+    pub scheduling: Vec<Value>,
     /// The next N submissions are refused (`forbiddenToSend`).
     pub refuse_submissions: usize,
     /// The next N requests with a submission are carried out, but answered
@@ -616,6 +619,9 @@ async fn api(
             let mut args = call[1].clone();
             resolve_back_references(&mut args, &responses);
             let in_shared = args["accountId"] == SHARED_ACCOUNT;
+            if method == "CalendarEvent/set" && args["sendSchedulingMessages"] == true {
+                model.scheduling.push(args.clone());
+            }
             let (name, result) = match model.method_faults.get_mut(&method) {
                 Some((error, remaining)) if *remaining > 0 => {
                     *remaining -= 1;
