@@ -16,6 +16,12 @@
   device with the offset they have from then on. EAS describes a zone as
   one offset or a yearly switch to daylight time and back, which cannot say
   "once".
+- MeetingResponse:
+  - With EAS 16, the organizer now gets a reply when the device asks for
+    one (`SendResponse`): the JMAP server sends it. Before, no reply was
+    sent.
+  - Answering one occurrence of a series (InstanceId) only answers that
+    occurrence instead of the whole series.
 - Contacts:
   - Car, radio, assistant, company main and MMS phones, the assistant,
     manager and children, the Yomi (phonetic) names and the office location

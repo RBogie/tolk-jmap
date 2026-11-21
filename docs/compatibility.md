@@ -38,7 +38,7 @@ Tolk speaks Exchange ActiveSync 14.0, 14.1, 16.0 and 16.1 (configurable with `EA
 | SendMail, SmartReply, SmartForward | Yes; retries with the same ClientId are not sent twice, also when the JMAP server's answer to the first attempt was lost (the retry checks whether it went out). A message the server refuses leaves no copy in Sent. |
 | Search | Mailbox (subject and text) and GAL (contacts and correspondents; the Stalwart directory forbids queries). |
 | Find (16.1) | Mailbox (free text, one folder or with DeepTraversal its subfolders, or everything) and GAL (at least four characters). Results carry ServerIds that ItemOperations, SmartReply and SmartForward accept. Pictures are not returned. |
-| MeetingResponse | Accept, tentative and decline, sent by the JMAP server. |
+| MeetingResponse | Accept, tentative and decline, for a whole series or (with an InstanceId) one occurrence. The reply to the organizer: up to 14.1 the device sends it itself; with 16.x the JMAP server sends it when the device asks (`SendResponse`), with the server's own text: a body or a proposed new time in the request is not passed on. |
 | Settings | Device information, user information and out-of-office (the JMAP vacation response: one message for all audiences). |
 | ResolveRecipients | Contacts and correspondents; no certificates, no free/busy. |
 | Autodiscover | Mobilesync XML and the v2 JSON form (see configuration.md for routing). |

@@ -1,11 +1,17 @@
 //! MeetingResponse (MS-ASCMD 2.2.1.11): accepting, tentatively accepting or
 //! declining a meeting, from its calendar item or from the invitation email.
 //!
-//! Only the user's own participation status on the calendar event changes.
-//! The email is only read: the invitation's UID finds the event, which is
-//! created in the default calendar if the server has not added it yet. No
-//! reply is sent by the server; with EAS 14.1 the device sends its own
-//! reply email.
+//! Only the user's own participation status on the calendar event changes,
+//! for the whole series or, with an InstanceId, for that occurrence (in its
+//! `recurrenceOverrides` entry). The email is only read: the invitation's
+//! UID finds the event, which is created in the default calendar if the
+//! server has not added it yet.
+//!
+//! The reply to the organizer: up to EAS 14.1 the device sends its own (with
+//! SendMail); with 16.x the server sends one when the request has
+//! `<SendResponse>` (MS-ASCMD 2.2.1.11), here the JMAP server, through
+//! `sendSchedulingMessages`. Its text is the server's: a body or a proposed
+//! new time in `<SendResponse>` is not passed on.
 
 use serde_json::{Map, Value, json};
 
@@ -60,8 +66,13 @@ async fn respond(req: &Request<'_>, jmap: &JmapClient, request: &Element) -> Com
     else {
         return Ok(reply(status::INVALID_REQUEST));
     };
-    if request.find(mr::InstanceId).is_some() {
-        tracing::info!("answering a single occurrence; the whole series is answered");
+    let send = req.version >= super::v16::VERSION && request.find(mr::SendResponse).is_some();
+    if send
+        && request
+            .find(mr::SendResponse)
+            .is_some_and(|r| r.elements().next().is_some())
+    {
+        tracing::info!("the reply's own text or proposed time is not passed on");
     }
     // An event in a shared calendar is answered in its account.
     let jmap = &*folder.client(jmap);
@@ -91,7 +102,7 @@ async fn respond(req: &Request<'_>, jmap: &JmapClient, request: &Element) -> Com
                 .next()
             {
                 Some(id) => Some(id),
-                None => match place_invitation(jmap, invite, req.own, answer).await? {
+                None => match place_invitation(jmap, invite, req.own, answer, send).await? {
                     Some(id) => {
                         tracing::info!(uid = %uid, answer, "invitation added to the calendar");
                         return finish(req, jmap, reply(status::OK), &id, answer).await;
@@ -109,29 +120,62 @@ async fn respond(req: &Request<'_>, jmap: &JmapClient, request: &Element) -> Com
     let events = jmap
         .get_objects(crate::jmap::CALENDAR_EVENT, &[event_id.as_str()])
         .await?;
-    let Some(key) = events
-        .first()
-        .and_then(|e| jscalendar::own_participant_key(e, req.own))
-    else {
+    let Some(event) = events.first() else {
+        return Ok(reply(status::INVALID_REQUEST));
+    };
+    let Some(key) = jscalendar::own_participant_key(event, req.own) else {
         tracing::warn!(event = event_id, "not an invitee of this event");
         return Ok(reply(status::INVALID_REQUEST));
     };
+    let status_path = format!("participants/{key}/participationStatus");
+    let patch = match request.child_text(mr::InstanceId) {
+        // One occurrence: its override (a patch of the series) gets it.
+        Some(instance) => {
+            let Some(occurrence) = jscalendar::occurrence_key(event, instance) else {
+                return Ok(reply(status::INVALID_REQUEST));
+            };
+            let overrides = &event["recurrenceOverrides"];
+            let mut entry = overrides[&occurrence]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            match entry.get_mut("participants") {
+                Some(participants) if participants[key].is_object() => {
+                    participants[key]["participationStatus"] = answer.into();
+                }
+                _ => {
+                    entry.insert(status_path, answer.into());
+                }
+            }
+            // A patch path needs an existing object.
+            if overrides.is_object() {
+                json!({ format!("recurrenceOverrides/{occurrence}"): entry })
+            } else {
+                json!({ "recurrenceOverrides": { occurrence: entry } })
+            }
+        }
+        None => json!({ status_path: answer }),
+    };
     let mut update = Map::new();
-    update.insert(
-        event_id.clone(),
-        json!({ format!("participants/{key}/participationStatus"): answer }),
-    );
+    update.insert(event_id.clone(), patch);
     let result = jmap
         .set(
             crate::jmap::CALENDAR_EVENT,
-            crate::jmap::SetRequest::default().update(update),
+            crate::jmap::SetRequest::default()
+                .update(update)
+                .with("sendSchedulingMessages", send),
         )
         .await?;
     if let Some(error) = result.error(&event_id) {
         tracing::warn!(event = event_id, error, "meeting response rejected");
         return Ok(reply(status::SERVER_ERROR));
     }
-    tracing::info!(event = event_id, answer, "meeting answered");
+    tracing::info!(
+        event = event_id,
+        answer,
+        reply_sent = send,
+        "meeting answered"
+    );
     finish(req, jmap, reply(status::OK), &event_id, answer).await
 }
 
@@ -176,6 +220,7 @@ async fn place_invitation(
     mut event: Value,
     own_email: &str,
     answer: &str,
+    send: bool,
 ) -> anyhow::Result<Option<String>> {
     let calendars = jmap.calendars().await?;
     let Some(calendar) = calendars
@@ -204,7 +249,9 @@ async fn place_invitation(
     let result = jmap
         .set(
             crate::jmap::CALENDAR_EVENT,
-            crate::jmap::SetRequest::default().create(create),
+            crate::jmap::SetRequest::default()
+                .create(create)
+                .with("sendSchedulingMessages", send),
         )
         .await?;
     Ok(result
