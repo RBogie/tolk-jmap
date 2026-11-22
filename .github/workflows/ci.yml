@@ -38,6 +38,33 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  # The same checks on Windows, where Tolk also runs natively.
+  windows:
+    name: windows
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Installs the version from rust-toolchain.toml.
+      - run: rustup toolchain install
+
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+      # The release binary as release.yml builds it.
+      - name: Release build
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --release --locked --target x86_64-pc-windows-msvc --bin tolk
+          target/x86_64-pc-windows-msvc/release/tolk.exe --version
+
   # Known vulnerabilities, licenses and crate sources (deny.toml).
   deny:
     name: deny

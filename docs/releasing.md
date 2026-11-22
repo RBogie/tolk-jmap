@@ -3,8 +3,10 @@
 A release is a signed tag on `main`. The [release workflow](../.github/workflows/release.yml)
 then builds, after approval, for every supported platform:
 
-- a static binary per platform (`tolk-<version>-linux-<arch>`) with
-  `SHA256SUMS` and the binaries' signed provenance
+- a static binary per platform (`tolk-<version>-linux-<arch>`), and a
+  Windows binary (`tolk-<version>-windows-amd64.exe`, built natively with
+  the C runtime linked in), with `SHA256SUMS` and the binaries' signed
+  provenance
   (`tolk-<version>.intoto.jsonl`, for offline verification), attached to the
   GitHub release;
 - one multi-platform image, `ghcr.io/rbogie/tolk-jmap:<version>` and, for a
@@ -18,8 +20,8 @@ Every pull request that changes something for users adds a line to the
 `## Unreleased` section of `CHANGELOG.md`, so a release only renames that
 section; its text becomes the release notes.
 
-Each platform is compiled once: the binary in the image is the release
-download. Version tags follow [Semantic Versioning](https://semver.org);
+Each Linux platform is compiled once: the binary in the image is the
+release download. Version tags follow [Semantic Versioning](https://semver.org);
 `v1.2.0-rc.1` makes a pre-release (image tag `1.2.0-rc.1` only).
 
 ## Steps
