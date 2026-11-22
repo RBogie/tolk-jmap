@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- Windows: a native binary (`tolk-<version>-windows-amd64.exe`) in each
+  release, with signed provenance, and Windows in CI. It stops on Ctrl-C,
+  Ctrl-Break, closing the console, logoff and shutdown, and trusts the
+  Windows certificate store. operations.md says how to protect its data
+  folder, since Windows does not get the Unix file modes.
+
 ### Changed
 
 - Dates and time zones are handled with jiff instead of chrono and

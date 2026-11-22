@@ -70,6 +70,9 @@ pub fn backup_if_due(state: &AppState, backups: &Backups) -> anyhow::Result<()> 
         );
         let path = backups.dir.join(name);
         state.store.backup(&path)?;
+        // Only the owner may read it. On Windows the file takes the folder's
+        // permissions (see operations.md).
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
         tracing::info!(path = %path.display(), "backed up the state database");
     }

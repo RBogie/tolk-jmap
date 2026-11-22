@@ -2,9 +2,10 @@ name: Release
 
 # A release starts with a signed `vX.Y.Z` tag (only the maintainer can
 # create those, see the tag rulesets) and waits for approval in the
-# `release` environment before anything is built or published. Each platform
-# is compiled once: the static binary is a release download and the image
-# for that platform is built from the same build. The images are combined
+# `release` environment before anything is built or published. Each Linux
+# platform is compiled once: the static binary is a release download and the
+# image for that platform is built from the same build. Windows gets a
+# binary only, built natively. The images are combined
 # into one multi-platform image on ghcr.io, and binaries and image get signed
 # build provenance (`gh attestation verify`). See docs/releasing.md.
 
@@ -144,9 +145,45 @@ jobs:
           path: digests/
           if-no-files-found: error
 
+  # A Windows binary with the C runtime linked in, so it needs no Visual C++
+  # redistributable. `--target` keeps the flag off build scripts and proc
+  # macros.
+  build-windows:
+    name: build (windows/amd64)
+    needs: approve
+    runs-on: windows-2025
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.ref_name }}
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - run: rustup toolchain install
+
+      - name: Binary
+        shell: bash
+        run: |
+          set -eu
+          export GIT_SHA="${GITHUB_SHA::7}"
+          cargo build --release --locked --target x86_64-pc-windows-msvc --bin tolk
+          mkdir dist
+          cp target/x86_64-pc-windows-msvc/release/tolk.exe "dist/tolk-${TAG#v}-windows-amd64.exe"
+          "dist/tolk-${TAG#v}-windows-amd64.exe" --version
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-windows-amd64
+          path: dist/
+          if-no-files-found: error
+
   publish:
     name: publish
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

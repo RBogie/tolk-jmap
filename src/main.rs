@@ -365,6 +365,8 @@ async fn healthcheck() -> i32 {
     }
 }
 
+/// Ctrl-C, or SIGTERM (as `docker stop` sends it).
+#[cfg(unix)]
 async fn stop_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -372,5 +374,23 @@ async fn stop_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = term.recv() => {}
+    }
+}
+
+/// Ctrl-C or Ctrl-Break, or the console window closing, the user logging
+/// off or Windows shutting down.
+#[cfg(windows)]
+async fn stop_signal() {
+    use tokio::signal::windows;
+    let mut ctrl_break = windows::ctrl_break().expect("install Ctrl-Break handler");
+    let mut close = windows::ctrl_close().expect("install console close handler");
+    let mut logoff = windows::ctrl_logoff().expect("install logoff handler");
+    let mut shutdown = windows::ctrl_shutdown().expect("install shutdown handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = ctrl_break.recv() => {}
+        _ = close.recv() => {}
+        _ = logoff.recv() => {}
+        _ = shutdown.recv() => {}
     }
 }

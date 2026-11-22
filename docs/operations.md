@@ -81,6 +81,27 @@ default). Capture only test accounts or for a short time, and never share
 captures: turn them into fixtures with `eas-sanitize` and review the
 `.xml` output first.
 
+## Windows
+
+The Windows binary (`tolk-<version>-windows-amd64.exe` from a release) runs
+Tolk natively, configured with the same environment variables. It uses the
+Windows certificate store to trust the JMAP server. Ctrl-C, Ctrl-Break,
+closing the console window, logging off or shutting Windows down stop it
+like SIGTERM does on Linux. It does not install itself as a Windows
+service: run it from a scheduled task at startup or with a service wrapper.
+
+On Linux, Tolk makes its backups and captured traffic readable by its own
+user only. On Windows files take the permissions of their folder, so put
+`STATE_DB`, `BACKUP_DIR` and `TRAFFIC_DIR` in a folder only the account that
+runs Tolk can read, for example:
+
+```bat
+icacls C:\Tolk\data /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"
+```
+
+The scripts in `scripts/` are for Linux and macOS. Docker Desktop and WSL
+run the Linux image too.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |

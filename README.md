@@ -85,8 +85,10 @@ runs as an unprivileged user and needs no capabilities and no writable
 filesystem apart from its data volume and `/tmp`, hence the flags above.
 Images are published for linux/amd64, arm64, arm/v7, 386, ppc64le and
 riscv64; each [release](https://github.com/RBogie/tolk-jmap/releases) also
-has the binaries, which run on any Linux without Docker. Pin a version, or
-better its digest (in the release notes); there is no `latest` tag.
+has the binaries, which run on any Linux without Docker, and a Windows
+binary (`tolk-<version>-windows-amd64.exe`, see
+[docs/operations.md](docs/operations.md#windows)). Pin a version, or better
+its digest (in the release notes); there is no `latest` tag.
 
 Releases carry signed build provenance, so you can check that a binary or
 image was built by this repository's release workflow from the tagged

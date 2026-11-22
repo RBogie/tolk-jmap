@@ -52,6 +52,9 @@ impl TrafficLog {
     ) -> anyhow::Result<Self> {
         if let Some(dir) = &dir {
             tokio::fs::create_dir_all(dir).await?;
+            // Only the owner may read it. On Windows the folder keeps the
+            // permissions it inherits (see operations.md).
+            #[cfg(unix)]
             tokio::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
                 .await?;
             if capture.is_empty() {
@@ -163,15 +166,14 @@ async fn write_body(dir: &Path, stem: &str, body: &[u8]) -> anyhow::Result<()> {
 }
 
 /// Writes a file only the service user can read (traffic contains mail).
+/// On Windows the file takes the folder's permissions (see operations.md).
 async fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .await?;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).await?;
     file.write_all(data).await
 }
 
