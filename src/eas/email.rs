@@ -38,6 +38,16 @@ pub struct BodyPreference {
 }
 
 impl BodyPreference {
+    /// The whole body as plain text.
+    pub fn whole() -> BodyPreference {
+        BodyPreference {
+            body_type: body_type::PLAIN,
+            truncation_size: None,
+            all_or_none: false,
+            preview: None,
+        }
+    }
+
     /// The first requested type we support; plain text when none was asked.
     pub fn choose(preferences: &[BodyPreference]) -> BodyPreference {
         preferences
@@ -49,12 +59,7 @@ impl BodyPreference {
                     body_type::PLAIN | body_type::HTML | body_type::MIME
                 )
             })
-            .unwrap_or(BodyPreference {
-                body_type: body_type::PLAIN,
-                truncation_size: None,
-                all_or_none: false,
-                preview: None,
-            })
+            .unwrap_or(BodyPreference::whole())
     }
 
     /// What `Email/get` must fetch to build this body.

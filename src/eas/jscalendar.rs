@@ -174,34 +174,7 @@ pub fn to_eas(event: &Value, body: &BodyPreference, own_email: &str) -> Element 
         },
     ));
     if !attendees.is_empty() {
-        let list = attendees
-            .iter()
-            .fold(Element::new(cal::Attendees), |list, p| {
-                let mut attendee = Element::new(cal::Attendee)
-                    .child(Element::with_text(
-                        cal::Email,
-                        participant_email(p).unwrap_or_default(),
-                    ))
-                    .child(Element::with_text(
-                        cal::Name,
-                        p["name"]
-                            .as_str()
-                            .filter(|n| !n.is_empty())
-                            .or(participant_email(p))
-                            .unwrap_or_default(),
-                    ));
-                attendee.push(Element::with_text(cal::AttendeeStatus, attendee_status(p)));
-                attendee.push(Element::with_text(
-                    cal::AttendeeType,
-                    if p["roles"]["optional"] == true {
-                        "2"
-                    } else {
-                        "1"
-                    },
-                ));
-                list.child(attendee)
-            });
-        data.push(list);
+        data.push(attendees_element(&attendees));
     }
     if is_meeting && !organized_by_me {
         let own = participants
@@ -236,11 +209,42 @@ pub fn to_eas(event: &Value, body: &BodyPreference, own_email: &str) -> Element 
         && let Some(recurrence) = recurrence(event, start, &timing)
     {
         data.push(recurrence);
-        if let Some(exceptions) = exceptions(event, &timing) {
+        if let Some(exceptions) = exceptions(event, &timing, body, organizer_email) {
             data.push(exceptions);
         }
     }
     data
+}
+
+/// An EAS `<Attendees>` list of these participants.
+fn attendees_element(attendees: &[&&Value]) -> Element {
+    attendees
+        .iter()
+        .fold(Element::new(cal::Attendees), |list, p| {
+            let mut attendee = Element::new(cal::Attendee)
+                .child(Element::with_text(
+                    cal::Email,
+                    participant_email(p).unwrap_or_default(),
+                ))
+                .child(Element::with_text(
+                    cal::Name,
+                    p["name"]
+                        .as_str()
+                        .filter(|n| !n.is_empty())
+                        .or(participant_email(p))
+                        .unwrap_or_default(),
+                ));
+            attendee.push(Element::with_text(cal::AttendeeStatus, attendee_status(p)));
+            attendee.push(Element::with_text(
+                cal::AttendeeType,
+                if p["roles"]["optional"] == true {
+                    "2"
+                } else {
+                    "1"
+                },
+            ));
+            list.child(attendee)
+        })
 }
 
 fn body_element(text: &str, pref: &BodyPreference) -> Element {
@@ -344,6 +348,10 @@ fn response_type(p: &Value) -> &'static str {
     }
 }
 
+/// The DayOfWeek sums that, with a WeekOfMonth, name the nth of a set of
+/// days (MS-ASCAL 2.2.2.37.1): any day, a weekday, a weekend day.
+const SET_MASKS: [u32; 3] = [127, 62, 65];
+
 const WEEKDAYS: [(&str, u32); 7] = [
     ("su", 1),
     ("mo", 2),
@@ -368,23 +376,50 @@ fn recurrence(event: &Value, start: DateTime, timing: &Timing) -> Option<Element
         (_, Value::Array(rules)) if rules.len() == 1 => &rules[0],
         _ => return None,
     };
-    if rule.get("bySetPosition").is_some() || rule.get("byHour").is_some() {
+    if rule.get("byHour").is_some() {
         return None;
     }
     let by_day: Vec<(u32, Option<i64>)> = rule["byDay"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|d| Some((weekday_bit(d["day"].as_str()?)?, d["nthOfPeriod"].as_i64())))
-        .collect();
+        .map(|d| Some((weekday_bit(d["day"].as_str()?)?, d["nthOfPeriod"].as_i64())))
+        .collect::<Option<_>>()?;
     let day_mask = by_day.iter().fold(0, |mask, (bit, _)| mask | bit);
-    let nth = by_day
-        .iter()
-        .find_map(|(bit, n)| n.map(|n| (*bit, if n < 0 { 5 } else { n })));
-    let month_day = rule["byMonthDay"]
-        .as_array()
-        .and_then(|d| d.first())
-        .and_then(Value::as_i64);
+    // The nth day of the month (WeekOfMonth 1 to 4, or 5 for the last), as
+    // EAS can say it: one weekday (`nthOfPeriod`), every listed day with the
+    // same n, or the nth of all days, weekdays or weekend days
+    // (`bySetPosition`, MS-ASCAL 2.2.2.37.1).
+    let week = |n: i64| match n {
+        1..=4 => Some(n),
+        -1 => Some(5),
+        _ => None,
+    };
+    let positions = rule["bySetPosition"].as_array();
+    let nth: Option<(u32, i64)> = match positions {
+        Some(positions) => match positions.as_slice() {
+            [position]
+                if by_day.iter().all(|(_, n)| n.is_none()) && SET_MASKS.contains(&day_mask) =>
+            {
+                Some((day_mask, week(position.as_i64()?)?))
+            }
+            _ => return None,
+        },
+        None if by_day.iter().any(|(_, n)| n.is_some()) => {
+            let n = by_day[0].1?;
+            if by_day.iter().any(|(_, other)| *other != Some(n)) {
+                return None;
+            }
+            Some((day_mask, week(n)?))
+        }
+        None => None,
+    };
+    let month_days = rule["byMonthDay"].as_array();
+    let month_day = match month_days.map(Vec::as_slice) {
+        None => None,
+        Some([day]) => Some(day.as_i64().filter(|d| (1..=31).contains(d))?),
+        Some(_) => return None,
+    };
     let month = rule["byMonth"]
         .as_array()
         .and_then(|m| m.first())
@@ -394,6 +429,10 @@ fn recurrence(event: &Value, start: DateTime, timing: &Timing) -> Option<Element
 
     let mut fields: Vec<(crate::wbxml::Tag, String)> = Vec::new();
     let kind = match rule["frequency"].as_str()? {
+        // Every Monday of the month, or an nth day of a week: EAS has no
+        // such pattern.
+        "monthly" | "yearly" if day_mask != 0 && nth.is_none() => return None,
+        "daily" | "weekly" if nth.is_some() => return None,
         "daily" if day_mask != 0 => {
             fields.push((cal::DayOfWeek, day_mask.to_string()));
             "1"
@@ -461,9 +500,16 @@ fn recurrence(event: &Value, start: DateTime, timing: &Timing) -> Option<Element
     Some(recurrence)
 }
 
-/// `recurrenceOverrides` as EAS exceptions: removed occurrences, and moved
-/// or renamed ones.
-fn exceptions(event: &Value, timing: &Timing) -> Option<Element> {
+/// `recurrenceOverrides` as EAS exceptions: removed occurrences, and the
+/// fields an occurrence has of its own (MS-ASCAL 2.2.2.21). A field the
+/// override names only by a path into it (`participants/p1/...`) is not
+/// shown.
+fn exceptions(
+    event: &Value,
+    timing: &Timing,
+    body: &BodyPreference,
+    organizer_email: Option<&str>,
+) -> Option<Element> {
     let overrides = event["recurrenceOverrides"].as_object()?;
     let mut list = Element::new(cal::Exceptions);
     let mut keys: Vec<&String> = overrides.keys().collect();
@@ -481,24 +527,132 @@ fn exceptions(event: &Value, timing: &Timing) -> Option<Element> {
         if patch["excluded"] == true {
             exception.push(Element::with_text(cal::Deleted, "1"));
         } else {
+            // The occurrence as the series with its patch applied: a server
+            // may store a field as a path into the series' value
+            // (`alerts/a1/trigger`). Fields that differ from the series are
+            // shown; the rest the device takes from the series.
+            let occurrence = apply_patch(event, patch);
+            // Unless moved, an occurrence starts at its recurrence id.
             let start = patch["start"]
                 .as_str()
                 .and_then(tz::parse_local)
                 .unwrap_or(original);
-            let duration = patch["duration"]
+            let duration = occurrence["duration"]
                 .as_str()
                 .and_then(tz::parse_duration)
                 .unwrap_or(timing.duration);
             let (begin, end) = timing.span(start, duration);
-            if let Some(title) = patch["title"].as_str() {
+            let differs = |key: &str| occurrence.get(key) != event.get(key);
+            if (patch.get("title").is_some() || differs("title"))
+                && let Some(title) = occurrence["title"].as_str()
+            {
                 exception.push(Element::with_text(cal::Subject, title));
             }
             exception.push(Element::with_text(cal::StartTime, tz::compact(begin)));
             exception.push(Element::with_text(cal::EndTime, tz::compact(end)));
+            if (patch.get("locations").is_some() || differs("locations"))
+                && let Some(location) = location(&occurrence)
+            {
+                exception.push(Element::with_text(cal::Location, location));
+            }
+            if differs("description")
+                && let Some(description) =
+                    occurrence["description"].as_str().filter(|d| !d.is_empty())
+            {
+                exception.push(body_element(description, body));
+            }
+            if differs("alerts")
+                && let Some(minutes) = reminder_minutes(&occurrence)
+            {
+                exception.push(Element::with_text(cal::Reminder, minutes.to_string()));
+            }
+            if differs("freeBusyStatus") {
+                let status = if occurrence["freeBusyStatus"] == "free" {
+                    busy::FREE
+                } else {
+                    busy::BUSY
+                };
+                exception.push(Element::with_text(cal::BusyStatus, status));
+            }
+            if differs("keywords") {
+                let categories = occurrence["keywords"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter(|(_, v)| **v == true)
+                    .fold(Element::new(cal::Categories), |list, (name, _)| {
+                        list.child(Element::with_text(cal::Category, name.as_str()))
+                    });
+                exception.push(categories);
+            }
+            if differs("participants")
+                && let Some(participants) = occurrence["participants"].as_object()
+            {
+                let attendees: Vec<&Value> = participants
+                    .values()
+                    .filter(|p| {
+                        participant_email(p).is_some_and(|e| {
+                            organizer_email.is_none_or(|o| !o.eq_ignore_ascii_case(e))
+                        })
+                    })
+                    .collect();
+                let attendees: Vec<&&Value> = attendees.iter().collect();
+                if !attendees.is_empty() {
+                    exception.push(attendees_element(&attendees));
+                }
+            }
         }
         list.push(exception);
     }
     (!list.children.is_empty()).then_some(list)
+}
+
+/// `event` with a `recurrenceOverrides` patch applied (RFC 8984 1.4.9): each
+/// key is a path (`/`-separated, `~1` for `/` and `~0` for `~`) and a `null`
+/// value removes what it names.
+fn apply_patch(event: &Value, patch: &Value) -> Value {
+    let mut out = event.clone();
+    if let Value::Object(out) = &mut out {
+        out.remove("recurrenceOverrides");
+    }
+    for (path, value) in patch.as_object().into_iter().flatten() {
+        let segments: Vec<String> = path
+            .split('/')
+            .map(|s| s.replace("~1", "/").replace("~0", "~"))
+            .collect();
+        let Some((last, parents)) = segments.split_last() else {
+            continue;
+        };
+        let mut target = &mut out;
+        for segment in parents {
+            if !target[segment.as_str()].is_object() {
+                target[segment.as_str()] = Value::Object(Map::new());
+            }
+            target = &mut target[segment.as_str()];
+        }
+        if let Value::Object(target) = target {
+            if value.is_null() {
+                target.remove(last);
+            } else {
+                target.insert(last.clone(), value.clone());
+            }
+        }
+    }
+    out
+}
+
+/// An occurrence's override with `new` fields written over `old`: a path
+/// below a written field (`alerts/a1/trigger` under `alerts`) goes, since a
+/// patch may not hold both (RFC 8984 1.4.9).
+pub fn merge_override(old: &Map<String, Value>, new: Map<String, Value>) -> Map<String, Value> {
+    let mut merged = old.clone();
+    merged.remove("excluded");
+    for key in new.keys() {
+        let below = format!("{key}/");
+        merged.retain(|k, _| !k.starts_with(&below));
+    }
+    merged.extend(new);
+    merged
 }
 
 /// The `<email:MeetingRequest>` of an invitation email, so the device shows
@@ -797,42 +951,61 @@ pub fn from_eas(data: &Element) -> Map<String, Value> {
             json!({ "l1": { "@type": "Location", "name": location } }),
         );
     }
-    if let Some(minutes) = text(cal::Reminder).and_then(|m| m.parse::<i64>().ok()) {
-        event.insert(
-            "alerts".to_owned(),
-            json!({ "a1": { "@type": "Alert", "action": "display",
-                "trigger": { "@type": "OffsetTrigger", "offset": format!("-{}", format_duration(Duration::from_mins(minutes))) } } }),
-        );
-    }
+    event.insert("alerts".to_owned(), alerts_from_eas(text(cal::Reminder)));
     event.insert(
         "freeBusyStatus".to_owned(),
-        (if text(cal::BusyStatus) == Some(busy::FREE) {
-            "free"
-        } else {
-            "busy"
-        })
-        .into(),
+        free_busy_from_eas(text(cal::BusyStatus)),
     );
     event.insert(
         "privacy".to_owned(),
-        (if matches!(text(cal::Sensitivity), Some("2" | "3")) {
-            "private"
-        } else {
-            "public"
-        })
-        .into(),
+        privacy_from_eas(text(cal::Sensitivity)),
     );
     if let Some(categories) = data.find(cal::Categories) {
-        let keywords: Map<String, Value> = categories
-            .find_all(cal::Category)
-            .filter_map(|c| c.text().filter(|t| !t.is_empty()))
-            .map(|name| (name.to_owned(), Value::Bool(true)))
-            .collect();
-        if !keywords.is_empty() {
-            event.insert("keywords".to_owned(), Value::Object(keywords));
-        }
+        event.insert("keywords".to_owned(), keywords_from_eas(categories));
     }
     event
+}
+
+/// The JSCalendar `alerts` for an EAS Reminder (minutes before the start).
+fn alerts_from_eas(reminder: Option<&str>) -> Value {
+    match reminder.and_then(|m| m.trim().parse::<i64>().ok()) {
+        Some(minutes) => json!({ "a1": { "@type": "Alert", "action": "display",
+            "trigger": { "@type": "OffsetTrigger",
+                "offset": format!("-{}", format_duration(Duration::from_mins(minutes))) } } }),
+        None => Value::Null,
+    }
+}
+
+fn free_busy_from_eas(status: Option<&str>) -> Value {
+    (if status.map(str::trim) == Some(busy::FREE) {
+        "free"
+    } else {
+        "busy"
+    })
+    .into()
+}
+
+fn privacy_from_eas(sensitivity: Option<&str>) -> Value {
+    (if matches!(sensitivity.map(str::trim), Some("2" | "3")) {
+        "private"
+    } else {
+        "public"
+    })
+    .into()
+}
+
+/// JSCalendar `keywords` for EAS `Categories`; `null` when there are none.
+fn keywords_from_eas(categories: &Element) -> Value {
+    let keywords: Map<String, Value> = categories
+        .find_all(cal::Category)
+        .filter_map(|c| c.text().filter(|t| !t.is_empty()))
+        .map(|name| (name.to_owned(), Value::Bool(true)))
+        .collect();
+    if keywords.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(keywords)
+    }
 }
 
 /// The EAS fields each [`MANAGED`] property is made from.
@@ -889,12 +1062,7 @@ pub fn change_from_eas(
                 && tag != airsyncbase::Body
                 && supported.is_none_or(|s| s.contains(&tag.to_string())))
     };
-    let whole = BodyPreference {
-        body_type: body_type::PLAIN,
-        truncation_size: None,
-        all_or_none: false,
-        preview: None,
-    };
+    let whole = BodyPreference::whole();
     let mut merged = data.clone();
     for element in to_eas(current, &whole, own_email).elements() {
         if !managed(element.tag) && element.tag != cal::Exceptions {
@@ -902,6 +1070,7 @@ pub fn change_from_eas(
         }
     }
     let mut event = from_eas(&merged);
+    let series = event.clone();
     // What the device was shown, read the same way: a field that reads the
     // same was not changed on the device.
     let shown = to_eas(current, shown_body, own_email);
@@ -937,16 +1106,52 @@ pub fn change_from_eas(
     if let Some(Value::Object(overrides)) = event.remove("recurrenceOverrides")
         && sent(cal::Exceptions)
     {
-        // An occurrence the device sent back as it was shown stays as it is.
+        // Each occurrence the device sent, by its recurrence id.
+        let timing = Timing::of(&Value::Object(series.clone()));
+        let sent_exceptions: std::collections::HashMap<String, &Element> = data
+            .find(cal::Exceptions)
+            .into_iter()
+            .flat_map(|list| list.find_all(cal::Exception))
+            .filter_map(|exception| {
+                let single = Element::new(cal::Exceptions).child(exception.clone());
+                let key = overrides_from_eas(&single, timing.tz.as_ref(), timing.all_day)
+                    .into_iter()
+                    .next()?
+                    .0;
+                Some((key, exception))
+            })
+            .collect();
+        // What the device sent back of an occurrence as it was shown stays as
+        // it is (a truncated description, say), and so does an occurrence
+        // sent back whole.
         let shown_overrides = shown_event.get("recurrenceOverrides").cloned();
         let overrides: Map<String, Value> = overrides
             .into_iter()
-            .filter(|(key, entry)| {
-                shown_overrides
-                    .as_ref()
-                    .and_then(|o| o.get(key))
-                    .is_none_or(|shown| shown != entry)
+            .filter_map(|(key, entry)| {
+                let shown = shown_overrides.as_ref().and_then(|o| o.get(&key));
+                let entry = match (entry, shown) {
+                    (Value::Object(mut entry), Some(Value::Object(shown))) => {
+                        entry.retain(|k, v| shown.get(k) != Some(v));
+                        if entry.is_empty() {
+                            return None;
+                        }
+                        Value::Object(entry)
+                    }
+                    (entry, _) => entry,
+                };
+                Some((key, entry))
             })
+            .map(|(key, mut entry)| {
+                if let Value::Object(fields) = &mut entry {
+                    let old = &current["recurrenceOverrides"][&key];
+                    inherit(fields, &series, old);
+                    if let Some(exception) = sent_exceptions.get(&key) {
+                        occurrence_attendees(fields, exception, own_email, current, old);
+                    }
+                }
+                (key, entry)
+            })
+            .filter(|(_, entry)| entry.as_object().is_none_or(|e| !e.is_empty()))
             .collect();
         if overrides.is_empty() {
             return patch;
@@ -958,10 +1163,7 @@ pub fn change_from_eas(
         for (key, entry) in overrides {
             let entry = match (&current["recurrenceOverrides"][&key], entry) {
                 (Value::Object(old), Value::Object(new)) if new.get("excluded").is_none() => {
-                    let mut merged = old.clone();
-                    merged.remove("excluded");
-                    merged.extend(new);
-                    Value::Object(merged)
+                    Value::Object(merge_override(old, new))
                 }
                 (_, entry) => entry,
             };
@@ -1011,6 +1213,22 @@ fn recurrence_from_eas(recurrence: &Element, tz: Option<&Tz>) -> Option<Value> {
             })
             .collect()
     };
+    // The nth weekday, or with a day, weekday or weekend day sum the nth of
+    // those days (MS-ASCAL 2.2.2.37.1): one occurrence a month either way.
+    let nth_days = |rule: &mut Map<String, Value>| -> Option<()> {
+        let mask = number(cal::DayOfWeek)?;
+        let week = number(cal::WeekOfMonth).filter(|w| (1..=5).contains(w))?;
+        if u32::try_from(mask).is_ok_and(|m| SET_MASKS.contains(&m)) {
+            rule.insert("byDay".to_owned(), days(mask, None).into());
+            rule.insert(
+                "bySetPosition".to_owned(),
+                json!([if week == 5 { -1 } else { week }]),
+            );
+        } else {
+            rule.insert("byDay".to_owned(), days(mask, Some(week)).into());
+        }
+        Some(())
+    };
     let mut rule = Map::new();
     rule.insert("@type".to_owned(), "RecurrenceRule".into());
     let frequency = match number(cal::Type)? {
@@ -1027,10 +1245,7 @@ fn recurrence_from_eas(recurrence: &Element, tz: Option<&Tz>) -> Option<Value> {
             "monthly"
         }
         3 => {
-            rule.insert(
-                "byDay".to_owned(),
-                days(number(cal::DayOfWeek)?, number(cal::WeekOfMonth)).into(),
-            );
+            nth_days(&mut rule)?;
             "monthly"
         }
         5 => {
@@ -1046,10 +1261,7 @@ fn recurrence_from_eas(recurrence: &Element, tz: Option<&Tz>) -> Option<Value> {
                 "byMonth".to_owned(),
                 json!([number(cal::MonthOfYear)?.to_string()]),
             );
-            rule.insert(
-                "byDay".to_owned(),
-                days(number(cal::DayOfWeek)?, number(cal::WeekOfMonth)).into(),
-            );
+            nth_days(&mut rule)?;
             "yearly"
         }
         _ => return None,
@@ -1074,6 +1286,7 @@ pub fn occurrence_override(
     event: &Value,
     instance_id: &str,
     data: Option<&Element>,
+    own_email: &str,
 ) -> Option<(String, Value)> {
     let timing = Timing::of(event);
     let mut exception = Element::new(cal::Exception)
@@ -1081,17 +1294,103 @@ pub fn occurrence_override(
     match data {
         None => exception.push(Element::with_text(cal::Deleted, "1")),
         Some(data) => {
-            for tag in [cal::Subject, cal::Location, cal::StartTime, cal::EndTime] {
-                if let Some(value) = data.child_text(tag) {
-                    exception.push(Element::with_text(tag, value));
+            for element in data.elements() {
+                if EXCEPTION_FIELDS.contains(&element.tag) {
+                    exception.push(element.clone());
                 }
             }
         }
     }
-    let exceptions = Element::new(cal::Exceptions).child(exception);
-    overrides_from_eas(&exceptions, timing.tz.as_ref(), timing.all_day)
+    let exceptions = Element::new(cal::Exceptions).child(exception.clone());
+    let (key, mut entry) = overrides_from_eas(&exceptions, timing.tz.as_ref(), timing.all_day)
         .into_iter()
-        .next()
+        .next()?;
+    if let Value::Object(entry) = &mut entry {
+        let series = from_eas(&to_eas(event, &BodyPreference::whole(), own_email));
+        let old = &event["recurrenceOverrides"][&key];
+        inherit(entry, &series, old);
+        occurrence_attendees(entry, &exception, own_email, event, old);
+    }
+    Some((key, entry))
+}
+
+/// The fields a change to one occurrence can carry (MS-ASCAL 2.2.2.21).
+const EXCEPTION_FIELDS: &[Tag] = &[
+    cal::Subject,
+    cal::Location,
+    cal::StartTime,
+    cal::EndTime,
+    airsyncbase::Body,
+    cal::Reminder,
+    cal::BusyStatus,
+    cal::Categories,
+    cal::Attendees,
+    cal::OrganizerEmail,
+    cal::MeetingStatus,
+];
+
+/// The occurrence fields beyond its title, place and time, which an
+/// override only keeps where they differ from the series. Sensitivity is not
+/// one: RFC 8984 (4.3.5) allows no `privacy` in an override.
+const OCCURRENCE_FIELDS: &[&str] = &["description", "alerts", "freeBusyStatus", "keywords"];
+
+/// Whether the device gives an occurrence a sensitivity other than the
+/// series', which JSCalendar cannot store (RFC 8984 4.3.5). `current` is the
+/// event a Change is for; `one_occurrence` an EAS 16 change by InstanceId.
+pub fn occurrence_privacy(current: Option<&Value>, data: &Element, one_occurrence: bool) -> bool {
+    let read = |s: &str| privacy_from_eas(Some(s));
+    let stored = current.map_or_else(|| read("0"), |event| read(sensitivity(event)));
+    if one_occurrence {
+        return data
+            .child_text(cal::Sensitivity)
+            .is_some_and(|s| read(s) != stored);
+    }
+    let series = data.child_text(cal::Sensitivity).map_or(stored, read);
+    data.find(cal::Exceptions)
+        .into_iter()
+        .flat_map(|list| list.find_all(cal::Exception))
+        .filter(|e| e.child_text(cal::Deleted).map(str::trim) != Some("1"))
+        .filter_map(|e| e.child_text(cal::Sensitivity))
+        .any(|s| read(s) != series)
+}
+
+/// Leaves out of an occurrence's override the fields that only repeat the
+/// series (`series` as [`from_eas`] reads it), so a later change to the
+/// series reaches the occurrence; a field the occurrence had its own value
+/// for (`old`) is written, now as the series has it.
+fn inherit(entry: &mut Map<String, Value>, series: &Map<String, Value>, old: &Value) {
+    for key in OCCURRENCE_FIELDS {
+        let repeats = entry
+            .get(*key)
+            .is_some_and(|value| value == series.get(*key).unwrap_or(&Value::Null));
+        let below = format!("{key}/");
+        let own_before = old
+            .as_object()
+            .is_some_and(|o| o.keys().any(|k| k == key || k.starts_with(&below)));
+        if repeats && !own_before {
+            entry.remove(*key);
+        }
+    }
+}
+
+/// The attendees of one occurrence of a meeting the user organizes, when the
+/// device sent others than the occurrence has.
+fn occurrence_attendees(
+    entry: &mut Map<String, Value>,
+    exception: &Element,
+    own_email: &str,
+    event: &Value,
+    old: &Value,
+) {
+    let Some(attendees) = attendees_from_eas(exception, own_email) else {
+        return;
+    };
+    let occurrence = apply_patch(event, old);
+    let current = &occurrence["participants"];
+    let participants = participants(own_email, &attendees, current);
+    if participants != *current {
+        entry.insert("participants".to_owned(), participants);
+    }
 }
 
 /// The `recurrenceOverrides` key (local recurrence id) of the occurrence an
@@ -1133,6 +1432,27 @@ fn overrides_from_eas(exceptions: &Element, tz: Option<&Tz>, all_day: bool) -> M
                     "locations".to_owned(),
                     json!({ "l1": { "@type": "Location", "name": location } }),
                 );
+            }
+            // An empty body is no change: devices send one for an
+            // occurrence whose description they did not load.
+            if let Some(description) = exception
+                .find(airsyncbase::Body)
+                .and_then(|b| b.child_text(airsyncbase::Data))
+                .filter(|d| !d.trim().is_empty())
+            {
+                patch.insert("description".to_owned(), description.into());
+            }
+            if let Some(reminder) = exception.find(cal::Reminder) {
+                patch.insert("alerts".to_owned(), alerts_from_eas(reminder.text()));
+            }
+            if let Some(status) = exception.child_text(cal::BusyStatus) {
+                patch.insert(
+                    "freeBusyStatus".to_owned(),
+                    free_busy_from_eas(Some(status)),
+                );
+            }
+            if let Some(categories) = exception.find(cal::Categories) {
+                patch.insert("keywords".to_owned(), keywords_from_eas(categories));
             }
             if let (Some(start), Some(end)) = (
                 exception
@@ -1177,13 +1497,15 @@ pub fn attendees_from_eas(data: &Element, own_email: &str) -> Option<Vec<(String
                 .to_owned();
             Some((email, name, a.child_text(cal::AttendeeType) == Some("2")))
         })
-        .filter(|(email, _, _)| !email.is_empty() && !email.eq_ignore_ascii_case(own_email))
+        .filter(|(email, _, _)| !email.is_empty() && !is_own(own_email, email))
         .collect();
     (!attendees.is_empty()).then_some(attendees)
 }
 
-/// JSCalendar 2.0 participants for `attendees`, with the user as organizer.
-/// Existing participants keep their entry (and response) when still invited.
+/// JSCalendar 2.0 participants for `attendees`, with the user as organizer
+/// (`own_email`: the user's addresses, the primary one first). Existing
+/// participants keep their entry (and response) when still invited, the user
+/// also under an alias.
 pub fn participants(
     own_email: &str,
     attendees: &[(String, String, bool)],
@@ -1199,11 +1521,15 @@ pub fn participants(
             .find(|(_, p)| participant_email(p).is_some_and(|e| e.eq_ignore_ascii_case(email)))
     };
     let mut out = Map::new();
-    let (owner_key, owner) = match find(own_email) {
+    let primary = own_email.split(',').next().unwrap_or_default().trim();
+    let own = existing
+        .iter()
+        .find(|(_, p)| participant_email(p).is_some_and(|e| is_own(own_email, e)));
+    let (owner_key, owner) = match own {
         Some((key, p)) => ((*key).clone(), (*p).clone()),
         None => (
             "owner".to_owned(),
-            json!({ "@type": "Participant", "calendarAddress": format!("mailto:{own_email}"),
+            json!({ "@type": "Participant", "calendarAddress": format!("mailto:{primary}"),
                     "roles": { "owner": true, "attendee": true }, "participationStatus": "accepted" }),
         ),
     };
@@ -1375,6 +1701,118 @@ mod tests {
 
         assert!(rule(json!({ "frequency": "hourly" })).is_none());
         assert!(rule(json!({ "frequency": "monthly", "bySetPosition": [1] })).is_none());
+    }
+
+    /// The nth of a set of days (MS-ASCAL 2.2.2.37.1), and the patterns EAS
+    /// cannot say, which are left out instead of sent as something else.
+    #[test]
+    fn maps_nth_of_a_set_of_days() {
+        let rule = |r: Value| {
+            let event = json!({ "start": "2026-03-10T09:00:00", "recurrenceRule": r });
+            recurrence(
+                &event,
+                tz::parse_local("2026-03-10T09:00:00").unwrap(),
+                &Timing::of(&event),
+            )
+        };
+        let fields = |r: &Element| {
+            [
+                cal::Type,
+                cal::DayOfWeek,
+                cal::WeekOfMonth,
+                cal::MonthOfYear,
+            ]
+            .map(|tag| text(r, tag).unwrap_or_default())
+        };
+        let all = json!([{ "day": "mo" }, { "day": "tu" }, { "day": "we" }, { "day": "th" },
+            { "day": "fr" }, { "day": "sa" }, { "day": "su" }]);
+        let last_day = rule(json!({ "frequency": "monthly", "byDay": all, "bySetPosition": [-1] }));
+        assert_eq!(fields(&last_day.unwrap()), ["3", "127", "5", ""]);
+        let first_weekday = rule(json!({ "frequency": "monthly", "bySetPosition": [1],
+            "byDay": [{ "day": "mo" }, { "day": "tu" }, { "day": "we" }, { "day": "th" }, { "day": "fr" }] }));
+        assert_eq!(fields(&first_weekday.unwrap()), ["3", "62", "1", ""]);
+        let last_weekend_day = rule(json!({ "frequency": "yearly", "byMonth": ["3"],
+            "byDay": [{ "day": "sa" }, { "day": "su" }], "bySetPosition": [-1] }));
+        assert_eq!(fields(&last_weekend_day.unwrap()), ["6", "65", "5", "3"]);
+        // The same n for every listed day.
+        let second = rule(json!({ "frequency": "monthly",
+            "byDay": [{ "day": "mo", "nthOfPeriod": 2 }, { "day": "we", "nthOfPeriod": 2 }] }));
+        assert_eq!(fields(&second.unwrap()), ["3", "10", "2", ""]);
+
+        for unsayable in [
+            // A fifth Monday is not the last one, nor is the second to last.
+            json!({ "frequency": "monthly", "byDay": [{ "day": "mo", "nthOfPeriod": 5 }] }),
+            json!({ "frequency": "monthly", "byDay": [{ "day": "mo", "nthOfPeriod": -2 }] }),
+            // Different n per day.
+            json!({ "frequency": "monthly",
+                "byDay": [{ "day": "mo", "nthOfPeriod": 1 }, { "day": "we", "nthOfPeriod": 3 }] }),
+            // Every Monday of the month.
+            json!({ "frequency": "monthly", "byDay": [{ "day": "mo" }] }),
+            // The last day by day of the month, or several days.
+            json!({ "frequency": "monthly", "byMonthDay": [-1] }),
+            json!({ "frequency": "monthly", "byMonthDay": [1, 15] }),
+            // Several positions, or a position in a week.
+            json!({ "frequency": "monthly", "byDay": all, "bySetPosition": [1, -1] }),
+            json!({ "frequency": "weekly", "byDay": all, "bySetPosition": [1] }),
+            json!({ "frequency": "monthly", "byDay": [{ "day": "xx" }] }),
+        ] {
+            assert!(rule(unsayable.clone()).is_none(), "{unsayable}");
+        }
+    }
+
+    #[test]
+    fn reads_nth_of_a_set_of_days() {
+        let read = |kind: &str, mask: &str, week: &str| {
+            let recurrence = Element::new(cal::Recurrence)
+                .child(Element::with_text(cal::Type, kind))
+                .child(Element::with_text(cal::DayOfWeek, mask))
+                .child(Element::with_text(cal::WeekOfMonth, week))
+                .child(Element::with_text(cal::MonthOfYear, "3"));
+            recurrence_from_eas(&recurrence, None).unwrap()
+        };
+        let day = |d: &str| json!({ "@type": "NDay", "day": d });
+        let last_day = read("3", "127", "5");
+        assert_eq!(
+            last_day["byDay"],
+            json!(["mo", "tu", "we", "th", "fr", "sa", "su"].map(day))
+        );
+        assert_eq!(last_day["bySetPosition"], json!([-1]));
+        let first_weekday = read("3", "62", "1");
+        assert_eq!(
+            first_weekday["byDay"],
+            json!(["mo", "tu", "we", "th", "fr"].map(day))
+        );
+        assert_eq!(first_weekday["bySetPosition"], json!([1]));
+        let last_weekend_day = read("6", "65", "5");
+        assert_eq!(last_weekend_day["frequency"], "yearly");
+        assert_eq!(last_weekend_day["byDay"], json!(["sa", "su"].map(day)));
+        assert_eq!(last_weekend_day["bySetPosition"], json!([-1]));
+        // A week of the month outside 1 to 5 is no rule.
+        let sixth = Element::new(cal::Recurrence)
+            .child(Element::with_text(cal::Type, "3"))
+            .child(Element::with_text(cal::DayOfWeek, "2"))
+            .child(Element::with_text(cal::WeekOfMonth, "6"));
+        assert!(recurrence_from_eas(&sixth, None).is_none());
+
+        // Read back as it was sent.
+        for (kind, mask, week) in [
+            ("3", "127", "5"),
+            ("3", "62", "1"),
+            ("6", "65", "5"),
+            ("3", "32", "5"),
+        ] {
+            let event =
+                json!({ "start": "2026-03-10T09:00:00", "recurrenceRule": read(kind, mask, week) });
+            let shown = recurrence(
+                &event,
+                tz::parse_local("2026-03-10T09:00:00").unwrap(),
+                &Timing::of(&event),
+            )
+            .unwrap();
+            assert_eq!(text(&shown, cal::Type).as_deref(), Some(kind));
+            assert_eq!(text(&shown, cal::DayOfWeek).as_deref(), Some(mask));
+            assert_eq!(text(&shown, cal::WeekOfMonth).as_deref(), Some(week));
+        }
     }
 
     /// Gmail's own blob for Amsterdam (see `tz` tests).
@@ -1761,6 +2199,362 @@ mod tests {
     fn set(data: &mut Element, tag: crate::wbxml::Tag, value: &str) {
         without(data, &[tag]);
         data.push(Element::with_text(tag, value));
+    }
+
+    /// An EAS 16 change to one occurrence, shaped like Gmail's (recorded
+    /// session 038): every field of the occurrence, some empty.
+    fn occurrence_change(edit: impl FnOnce(&mut Element)) -> Element {
+        let mut data = Element::new(airsync::ApplicationData)
+            .child(Element::with_text(cal::AllDayEvent, "0"))
+            .child(Element::with_text(cal::StartTime, "20261118T160000Z"))
+            .child(Element::with_text(cal::EndTime, "20261118T170000Z"))
+            .child(Element::with_text(cal::Subject, "Review"))
+            .child(
+                Element::new(airsyncbase::Body)
+                    .child(Element::with_text(airsyncbase::Type, "1"))
+                    .child(Element::new(airsyncbase::Data)),
+            )
+            .child(Element::with_text(cal::Reminder, "15"))
+            .child(Element::new(cal::Attendees))
+            .child(Element::with_text(cal::BusyStatus, "2"))
+            .child(Element::with_text(cal::MeetingStatus, "0"))
+            .child(Element::with_text(cal::Sensitivity, "0"));
+        edit(&mut data);
+        data
+    }
+
+    #[test]
+    fn an_occurrence_keeps_its_own_fields() {
+        let event = series();
+        let data = occurrence_change(|d| {
+            set(d, cal::Reminder, "30");
+            set(d, cal::BusyStatus, "0");
+            set(d, cal::Sensitivity, "2");
+            without(d, &[airsyncbase::Body]);
+            d.push(
+                Element::new(airsyncbase::Body)
+                    .child(Element::with_text(airsyncbase::Type, "1"))
+                    .child(Element::with_text(airsyncbase::Data, "Bring slides")),
+            );
+            d.push(
+                Element::new(cal::Categories).child(Element::with_text(cal::Category, "Travel")),
+            );
+        });
+        let (key, entry) =
+            occurrence_override(&event, "20261118T160000Z", Some(&data), "rob@example.com")
+                .unwrap();
+        assert_eq!(key, "2026-11-18T17:00:00");
+        assert_eq!(entry["description"], "Bring slides");
+        assert_eq!(
+            entry["alerts"]["a1"]["trigger"]["offset"], "-PT30M",
+            "{entry}"
+        );
+        assert_eq!(entry["freeBusyStatus"], "free");
+        assert!(
+            entry.get("privacy").is_none(),
+            "not in an override: {entry}"
+        );
+        assert_eq!(entry["keywords"], json!({ "Travel": true }));
+        assert!(entry.get("participants").is_none(), "no attendees: {entry}");
+    }
+
+    #[test]
+    fn a_sensitivity_of_one_occurrence_is_unsupported() {
+        let event = series();
+        let occurrence = |s: &str| occurrence_change(|d| set(d, cal::Sensitivity, s));
+        // EAS 16: the series' sensitivity (Gmail always sends one) is fine.
+        assert!(!occurrence_privacy(Some(&event), &occurrence("0"), true));
+        assert!(occurrence_privacy(Some(&event), &occurrence("2"), true));
+        assert!(!occurrence_privacy(
+            Some(&event),
+            &occurrence_change(|d| without(d, &[cal::Sensitivity])),
+            true
+        ));
+        // EAS 14: an exception against the series as the device sends it.
+        let with_exception = |series: &str, exception: &str| {
+            device(&event, |d| {
+                set(d, cal::Sensitivity, series);
+                without(d, &[cal::Exceptions]);
+                d.push(
+                    Element::new(cal::Exceptions).child(
+                        Element::new(cal::Exception)
+                            .child(Element::with_text(
+                                cal::ExceptionStartTime,
+                                "20261125T160000Z",
+                            ))
+                            .child(Element::with_text(cal::Sensitivity, exception)),
+                    ),
+                );
+            })
+        };
+        assert!(!occurrence_privacy(
+            Some(&event),
+            &with_exception("2", "2"),
+            false
+        ));
+        assert!(occurrence_privacy(
+            Some(&event),
+            &with_exception("0", "2"),
+            false
+        ));
+        assert!(occurrence_privacy(None, &with_exception("2", "0"), false));
+    }
+
+    #[test]
+    fn an_occurrence_does_not_repeat_the_series() {
+        let event = series();
+        // As Gmail sends it: the series' values, an empty body.
+        let data = occurrence_change(|_| {});
+        let (_, entry) =
+            occurrence_override(&event, "20261118T160000Z", Some(&data), "rob@example.com")
+                .unwrap();
+        for key in OCCURRENCE_FIELDS {
+            assert!(entry.get(*key).is_none(), "{key} in {entry}");
+        }
+        // No reminder for this occurrence is one of its own.
+        let data = occurrence_change(|d| {
+            without(d, &[cal::Reminder]);
+            d.push(Element::new(cal::Reminder));
+        });
+        let (_, entry) =
+            occurrence_override(&event, "20261118T160000Z", Some(&data), "rob@example.com")
+                .unwrap();
+        assert_eq!(entry["alerts"], Value::Null);
+        assert!(entry.as_object().unwrap().contains_key("alerts"));
+        // Back to the series' description: written over the occurrence's own.
+        let moved = Element::with_text(airsyncbase::Data, "Bring the numbers");
+        let data = occurrence_change(|d| {
+            without(d, &[airsyncbase::Body]);
+            d.push(Element::new(airsyncbase::Body).child(moved));
+        });
+        let (key, entry) =
+            occurrence_override(&event, "20261125T160000Z", Some(&data), "rob@example.com")
+                .unwrap();
+        assert_eq!(key, "2026-11-25T17:00:00");
+        assert_eq!(entry["description"], "Bring the numbers");
+    }
+
+    #[test]
+    fn occurrence_fields_are_shown_and_read_back() {
+        let mut event = series();
+        event["recurrenceOverrides"]["2026-11-25T17:00:00"] = json!({
+            "title": "Review (moved)", "start": "2026-11-25T18:00:00",
+            "description": "Other room",
+            "locations": { "x": { "name": "Room 2" } },
+            "alerts": { "b": { "trigger": { "@type": "OffsetTrigger", "offset": "-PT1H" } } },
+            "freeBusyStatus": "free", "keywords": { "Travel": true },
+            "participants/p1/participationStatus": "declined",
+        });
+        let data = to_eas(&event, &plain(), "rob@example.com");
+        let exception = data
+            .find(cal::Exceptions)
+            .unwrap()
+            .find_all(cal::Exception)
+            .find(|e| e.child_text(cal::ExceptionStartTime) == Some("20261125T160000Z"))
+            .unwrap();
+        assert_eq!(text(exception, cal::Location).as_deref(), Some("Room 2"));
+        assert_eq!(text(exception, cal::Reminder).as_deref(), Some("60"));
+        assert_eq!(text(exception, cal::BusyStatus).as_deref(), Some("0"));
+        assert_eq!(
+            exception
+                .find(airsyncbase::Body)
+                .and_then(|b| b.child_text(airsyncbase::Data)),
+            Some("Other room")
+        );
+        assert_eq!(
+            exception
+                .find(cal::Categories)
+                .and_then(|c| c.child_text(cal::Category)),
+            Some("Travel")
+        );
+        assert!(
+            exception.find(cal::Attendees).is_none(),
+            "a participant without an address"
+        );
+        // Read back, the occurrence is what it was (apart from the path).
+        let read = from_eas(&data);
+        let entry = &read["recurrenceOverrides"]["2026-11-25T17:00:00"];
+        assert_eq!(entry["title"], "Review (moved)");
+        assert_eq!(entry["description"], "Other room");
+        assert_eq!(entry["freeBusyStatus"], "free");
+        assert_eq!(entry["keywords"], json!({ "Travel": true }));
+        assert_eq!(entry["alerts"]["a1"]["trigger"]["offset"], "-PT1H");
+    }
+
+    /// Stalwart stores an override as a minimal patch, with paths into the
+    /// series' values; such an occurrence is shown and merged like any other.
+    #[test]
+    fn an_override_with_paths_is_shown_and_merged() {
+        let mut event = series();
+        event["recurrenceOverrides"]["2026-12-09T17:00:00"] = json!({
+            "alerts/a/trigger": { "@type": "OffsetTrigger", "offset": "-PT45M" },
+            "description": "Bring the slides",
+            "keywords/Travel": true,
+        });
+        let data = to_eas(&event, &plain(), "rob@example.com");
+        let exception = data
+            .find(cal::Exceptions)
+            .unwrap()
+            .find_all(cal::Exception)
+            .find(|e| e.child_text(cal::ExceptionStartTime) == Some("20261209T160000Z"))
+            .unwrap();
+        assert_eq!(text(exception, cal::Reminder).as_deref(), Some("45"));
+        assert_eq!(
+            text(exception, cal::StartTime).as_deref(),
+            Some("20261209T160000Z"),
+            "at its recurrence id"
+        );
+        assert_eq!(
+            text(exception, cal::EndTime).as_deref(),
+            Some("20261209T170000Z")
+        );
+        let categories: Vec<&str> = exception
+            .find(cal::Categories)
+            .unwrap()
+            .find_all(cal::Category)
+            .filter_map(Element::text)
+            .collect();
+        assert_eq!(categories, ["Travel", "Work"]);
+        assert!(
+            exception.child_text(cal::Subject).is_none(),
+            "the series' title"
+        );
+        assert!(
+            exception.find(cal::BusyStatus).is_none(),
+            "the series' status"
+        );
+
+        // A new reminder replaces the path below it.
+        let old = event["recurrenceOverrides"]["2026-12-09T17:00:00"]
+            .as_object()
+            .unwrap();
+        let new = json!({ "alerts": { "a1": { "trigger": { "offset": "-PT5M" } } } });
+        let merged = merge_override(old, new.as_object().unwrap().clone());
+        let keys: Vec<&String> = merged.keys().collect();
+        assert_eq!(
+            keys,
+            ["alerts", "description", "keywords/Travel"],
+            "{merged:?}"
+        );
+
+        // A removed field and an escaped path segment.
+        let patched = apply_patch(
+            &json!({ "title": "A", "links": { "a/b": { "href": "x" } } }),
+            &json!({ "title": null, "links/a~1b/href": "y" }),
+        );
+        assert_eq!(patched, json!({ "links": { "a/b": { "href": "y" } } }));
+    }
+
+    #[test]
+    fn eas14_an_exception_sent_back_truncated_keeps_its_description() {
+        let mut event = series();
+        event["recurrenceOverrides"]["2026-11-25T17:00:00"]["description"] =
+            json!("A long note about the room ".repeat(20));
+        let short = BodyPreference {
+            truncation_size: Some(40),
+            ..plain()
+        };
+        let mut data = to_eas(&event, &short, "rob@example.com");
+        // Rename the moved occurrence, the rest as the device was shown.
+        let exceptions = data
+            .children
+            .iter_mut()
+            .find_map(|n| match n {
+                crate::wbxml::Node::Element(e) if e.tag == cal::Exceptions => Some(e),
+                _ => None,
+            })
+            .unwrap();
+        for node in &mut exceptions.children {
+            if let crate::wbxml::Node::Element(e) = node
+                && e.child_text(cal::ExceptionStartTime) == Some("20261125T160000Z")
+            {
+                set(e, cal::Subject, "Review (room 2)");
+            }
+        }
+        let patch = change_from_eas(&event, &data, 141, None, "rob@example.com", &short);
+        let entry = &patch["recurrenceOverrides/2026-11-25T17:00:00"];
+        assert_eq!(entry["title"], "Review (room 2)");
+        assert_eq!(
+            entry["description"],
+            event["recurrenceOverrides"]["2026-11-25T17:00:00"]["description"],
+            "not cut: {entry}"
+        );
+        assert!(
+            !patch.contains_key("recurrenceOverrides/2026-12-02T17:00:00"),
+            "{patch:?}"
+        );
+    }
+
+    #[test]
+    fn the_user_is_matched_under_every_address() {
+        let own = "rob@example.com,robert@example.org";
+        let data = Element::new(airsync::ApplicationData)
+            .child(Element::with_text(
+                cal::OrganizerEmail,
+                "robert@example.org",
+            ))
+            .child(
+                Element::new(cal::Attendees)
+                    .child(
+                        Element::new(cal::Attendee)
+                            .child(Element::with_text(cal::Email, "Robert@example.org")),
+                    )
+                    .child(
+                        Element::new(cal::Attendee)
+                            .child(Element::with_text(cal::Email, "ann@example.com")),
+                    ),
+            );
+        let attendees = attendees_from_eas(&data, own).unwrap();
+        assert_eq!(attendees.len(), 1, "{attendees:?}");
+        assert_eq!(attendees[0].0, "ann@example.com");
+        // The user's entry under an alias is kept, not added again.
+        let existing = json!({ "me": { "calendarAddress": "mailto:robert@example.org",
+            "roles": { "owner": true }, "participationStatus": "accepted" } });
+        let participants = participants(own, &attendees, &existing);
+        assert_eq!(participants.as_object().unwrap().len(), 2, "{participants}");
+        assert!(participants["me"].is_object());
+        // A new organizer entry uses the primary address.
+        let participants = super::participants(own, &attendees, &Value::Null);
+        assert_eq!(
+            participants["owner"]["calendarAddress"],
+            "mailto:rob@example.com"
+        );
+    }
+
+    #[test]
+    fn an_occurrence_gets_its_own_attendees() {
+        let mut event = series();
+        event["participants"] = json!({
+            "o": { "calendarAddress": "mailto:rob@example.com", "roles": { "owner": true } },
+            "a": { "calendarAddress": "mailto:ann@example.com", "roles": { "attendee": true },
+                "participationStatus": "accepted" },
+        });
+        let attendee =
+            |email: &str| Element::new(cal::Attendee).child(Element::with_text(cal::Email, email));
+        let with = |list: Element| {
+            occurrence_change(move |d| {
+                without(d, &[cal::Attendees]);
+                d.push(list);
+            })
+        };
+        // The same attendees: nothing for the occurrence.
+        let same = with(Element::new(cal::Attendees).child(attendee("ann@example.com")));
+        let (_, entry) =
+            occurrence_override(&event, "20261118T160000Z", Some(&same), "rob@example.com")
+                .unwrap();
+        assert!(entry.get("participants").is_none(), "{entry}");
+        // One more for this occurrence.
+        let more = with(
+            Element::new(cal::Attendees)
+                .child(attendee("ann@example.com"))
+                .child(attendee("bob@example.com")),
+        );
+        let (_, entry) =
+            occurrence_override(&event, "20261118T160000Z", Some(&more), "rob@example.com")
+                .unwrap();
+        let participants = entry["participants"].as_object().unwrap();
+        assert_eq!(participants.len(), 3, "{entry}");
+        assert_eq!(participants["a"]["participationStatus"], "accepted");
     }
 
     #[test]

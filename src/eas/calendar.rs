@@ -248,7 +248,7 @@ impl<'a> CalendarChanges<'a> {
         if let Some(attendees) = jscalendar::attendees_from_eas(data, own) {
             event.insert(
                 "participants".to_owned(),
-                jscalendar::participants(email, &attendees, existing),
+                jscalendar::participants(own, &attendees, existing),
             );
             event.insert(
                 "organizerCalendarAddress".to_owned(),
@@ -305,16 +305,14 @@ impl Kind for CalendarChanges<'_> {
             let has_participants = event["participants"].is_object();
             let has_overrides = event["recurrenceOverrides"].is_object();
             let Some((recurrence_id, entry)) =
-                jscalendar::occurrence_override(event, instance, data)
+                jscalendar::occurrence_override(event, instance, data, self.req.own)
             else {
                 return Patch::NotFound;
             };
             // What the device left out of the occurrence stays as it was.
             let entry = match (&event["recurrenceOverrides"][&recurrence_id], entry) {
                 (Value::Object(old), Value::Object(new)) if new.get("excluded").is_none() => {
-                    let mut merged = old.clone();
-                    merged.extend(new);
-                    Value::Object(merged)
+                    Value::Object(jscalendar::merge_override(old, new))
                 }
                 (_, entry) => entry,
             };
@@ -340,11 +338,26 @@ impl Kind for CalendarChanges<'_> {
             data,
             self.req.version,
             self.supported,
-            self.req.email,
+            self.req.own,
             self.body,
         );
         self.organize(&mut patch, data, &current["participants"]);
         Patch::Apply(patch)
+    }
+
+    fn unsupported(
+        &self,
+        id: Option<&str>,
+        command: &Element,
+        data: &Element,
+    ) -> Vec<&'static str> {
+        let current = id.and_then(|id| self.current(id));
+        let one_occurrence = instance_id(command).is_some();
+        if jscalendar::occurrence_privacy(current, data, one_occurrence) {
+            vec!["Sensitivity of one occurrence"]
+        } else {
+            Vec::new()
+        }
     }
 
     fn current_version(&self, id: &str) -> Option<u64> {

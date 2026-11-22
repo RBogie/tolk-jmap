@@ -18,6 +18,10 @@
 //!                                     fetches the event and sends all of it
 //!                                     back with these Calendar fields
 //!                                     replaced, as iOS edits an event
+//!   edit-occurrence <collection> <key> <server-id> <instance-id> <Field=value>...
+//!                                     an EAS 16 change to one occurrence with
+//!                                     these calendar fields (Body= for the
+//!                                     description, Field= for an empty one)
 //!   edit-contact <collection> <key> <server-id> <Field=value>...
 //!                                     the same for a contact (Contacts and
 //!                                     Contacts2 fields)
@@ -284,6 +288,50 @@ async fn run(
                 .child(text(airsync::ServerId, server_id))
                 .child(data);
             client.send("Sync", Some(sync(next_key, change))).await
+        }
+        "edit-occurrence" => {
+            let (collection, key) = (arg(0, "collection")?, arg(1, "key")?);
+            let mut data = Element::new(airsync::ApplicationData);
+            for field in args.iter().skip(4) {
+                let (name, value) = field.split_once('=').context("Field=value")?;
+                if name == "Body" {
+                    data.push(
+                        Element::new(airsyncbase::Body)
+                            .child(text(airsyncbase::Type, "1"))
+                            .child(text(airsyncbase::Data, value)),
+                    );
+                    continue;
+                }
+                let page = wbxml::cp::page(4).context("calendar code page")?;
+                let (token, _) = page
+                    .tags
+                    .iter()
+                    .find(|(_, n)| *n == name)
+                    .with_context(|| format!("no calendar field {name}"))?;
+                let tag = wbxml::Tag {
+                    page: page.number,
+                    token: *token,
+                };
+                data.push(if value.is_empty() {
+                    Element::new(tag)
+                } else {
+                    text(tag, value)
+                });
+            }
+            let change = Element::new(airsync::Change)
+                .child(text(airsync::ServerId, arg(2, "server-id")?))
+                .child(text(airsyncbase::InstanceId, arg(3, "instance-id")?))
+                .child(data);
+            let body = Element::new(airsync::Sync).child(
+                Element::new(airsync::Collections).child(
+                    Element::new(airsync::Collection)
+                        .child(text(airsync::SyncKey, key))
+                        .child(text(airsync::CollectionId, collection))
+                        .child(text(airsync::GetChanges, "0"))
+                        .child(Element::new(airsync::Commands).child(change)),
+                ),
+            );
+            client.send("Sync", Some(body)).await
         }
         "sync-read" | "sync-delete" | "add-event" | "change-contact" => {
             let (collection, key) = (arg(0, "collection")?, arg(1, "key")?);

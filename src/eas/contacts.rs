@@ -223,7 +223,12 @@ impl Kind for ContactChanges<'_> {
         self.versions.get(id).copied()
     }
 
-    fn unsupported(&self, data: &Element) -> Vec<&'static str> {
+    fn unsupported(
+        &self,
+        _id: Option<&str>,
+        _command: &Element,
+        data: &Element,
+    ) -> Vec<&'static str> {
         jscontact::UNSUPPORTED
             .iter()
             .filter(|(tag, _)| data.child_text(*tag).is_some_and(|v| !v.trim().is_empty()))
