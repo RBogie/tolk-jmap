@@ -540,6 +540,13 @@ pub struct SetResult {
 }
 
 impl SetResult {
+    fn extend(&mut self, other: SetResult) {
+        self.created.extend(other.created);
+        self.not_created.extend(other.not_created);
+        self.not_updated.extend(other.not_updated);
+        self.not_destroyed.extend(other.not_destroyed);
+    }
+
     /// The JMAP error type when the update or destroy of `id` failed.
     pub fn error(&self, id: &str) -> Option<&str> {
         self.not_updated
@@ -677,11 +684,79 @@ impl JmapClient {
     }
 
     /// Creates, updates and destroys objects; failures come back per id in
-    /// the result. An empty request makes no call.
+    /// the result. An empty request makes no call. More objects than the
+    /// server's `maxObjectsInSet` go in several calls, creates first, then
+    /// updates, then destroys (the order of one call); when a later call
+    /// fails, its objects are reported as failed (`serverFail`), since the
+    /// earlier ones were carried out.
     pub async fn set(&self, data_type: DataType, request: SetRequest) -> anyhow::Result<SetResult> {
         if request.is_empty() {
             return Ok(SetResult::default());
         }
+        let limit = self.max_objects_in_set();
+        let SetRequest {
+            create,
+            update,
+            destroy,
+            extra,
+        } = request;
+        let mut batches: Vec<SetRequest> = Vec::new();
+        let mut batch = SetRequest::default();
+        let mut size = 0;
+        let mut next = |batch: &mut SetRequest, size: &mut usize| {
+            *size += 1;
+            if *size > limit {
+                batches.push(std::mem::take(batch));
+                *size = 1;
+            }
+        };
+        for (id, object) in create {
+            next(&mut batch, &mut size);
+            batch.create.insert(id, object);
+        }
+        for (id, patch) in update {
+            next(&mut batch, &mut size);
+            batch.update.insert(id, patch);
+        }
+        for id in destroy {
+            next(&mut batch, &mut size);
+            batch.destroy.push(id);
+        }
+        batches.push(batch);
+        let mut result = SetResult::default();
+        for (n, mut batch) in batches.into_iter().enumerate() {
+            batch.extra = extra.clone();
+            let ids = (
+                batch.create.keys().cloned().collect::<Vec<_>>(),
+                batch.update.keys().cloned().collect::<Vec<_>>(),
+                batch.destroy.clone(),
+            );
+            match self.set_once(data_type, batch).await {
+                Ok(part) => result.extend(part),
+                Err(e) if n == 0 || is_unauthorized(&e) => return Err(e),
+                Err(e) => {
+                    tracing::warn!(error = format!("{e:#}"), "part of a /set failed");
+                    let failed = || json!({ "type": "serverFail" });
+                    result
+                        .not_created
+                        .extend(ids.0.into_iter().map(|id| (id, failed())));
+                    result
+                        .not_updated
+                        .extend(ids.1.into_iter().map(|id| (id, failed())));
+                    result
+                        .not_destroyed
+                        .extend(ids.2.into_iter().map(|id| (id, failed())));
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    async fn set_once(
+        &self,
+        data_type: DataType,
+        request: SetRequest,
+    ) -> anyhow::Result<SetResult> {
         let method = format!("{}/set", data_type.name);
         let mut args = request.extra;
         args.insert(
@@ -740,6 +815,17 @@ impl JmapClient {
             )
             .await?;
         Ok(serde_json::from_value(args["list"].take())?)
+    }
+
+    /// Server limit for objects per `/set` call, capped to keep requests
+    /// modest.
+    fn max_objects_in_set(&self) -> usize {
+        self.session
+            .capabilities
+            .get(CORE)
+            .and_then(|core| core["maxObjectsInSet"].as_u64())
+            .map_or(500, |n| n as usize)
+            .clamp(1, 500)
     }
 
     /// Server limit for ids per `/get` call, capped to keep requests modest.
@@ -888,34 +974,75 @@ impl JmapClient {
         /// Paging keeps each response small; servers cap the page size too.
         const PAGE: usize = 1000;
         const MAX_ITEMS: usize = 250_000;
+        /// Fresh starts when the result changes while paging.
+        const ATTEMPTS: usize = 5;
+        for _ in 0..ATTEMPTS {
+            if let Some(ids) = self
+                .query_pages(
+                    using,
+                    account_id,
+                    method,
+                    &filter,
+                    sort.as_ref(),
+                    PAGE,
+                    MAX_ITEMS,
+                )
+                .await?
+            {
+                return Ok(ids);
+            }
+            tracing::debug!(method, "query result changed while paging, starting over");
+        }
+        bail!("{method}: the result kept changing while paging ({ATTEMPTS} attempts)")
+    }
+
+    /// All ids of a query, page by page; `None` when the result changed in
+    /// between (its `queryState` differs, RFC 8620 5.5), since an id taken
+    /// out of an earlier page shifts the rest and one would be skipped.
+    #[allow(clippy::too_many_arguments)]
+    async fn query_pages(
+        &self,
+        using: &[&str],
+        account_id: &str,
+        method: &str,
+        filter: &Value,
+        sort: Option<&Value>,
+        page_size: usize,
+        max_items: usize,
+    ) -> anyhow::Result<Option<Vec<String>>> {
         let mut ids: Vec<String> = Vec::new();
+        let mut state: Option<String> = None;
         loop {
             let mut args = json!({
                 "accountId": account_id,
                 "filter": filter,
                 "position": ids.len(),
-                "limit": PAGE,
+                "limit": page_size,
                 "calculateTotal": true,
             });
-            if let Some(sort) = &sort {
+            if let Some(sort) = sort {
                 args["sort"] = sort.clone();
             }
             let mut result = self.call_using(using, method, args).await?;
+            let page_state = result["queryState"].as_str().map(str::to_owned);
+            match (&state, &page_state) {
+                (Some(first), Some(now)) if first != now => return Ok(None),
+                (None, _) => state = page_state,
+                _ => {}
+            }
             let page: Vec<String> = serde_json::from_value(result["ids"].take())?;
             let total = result["total"].as_u64().context("query without total")? as usize;
-            if total > MAX_ITEMS {
-                bail!("{method} matches {total} items, more than the supported {MAX_ITEMS}");
+            if total > max_items {
+                bail!("{method} matches {total} items, more than the supported {max_items}");
             }
             let empty = page.is_empty();
             ids.extend(page);
             if ids.len() >= total {
-                return Ok(ids);
+                return Ok(Some(ids));
             }
             if empty {
-                bail!(
-                    "{method} returned {} of {total} items (the result changed while paging)",
-                    ids.len()
-                );
+                // The result shrank without a new queryState.
+                return Ok(None);
             }
         }
     }
@@ -947,12 +1074,19 @@ impl JmapClient {
     /// Follows the account's EventSource push stream (RFC 8620 7.3) and calls
     /// `on_change` with the changed data types of every state change (`None`
     /// when they are unknown). Returns when the stream ends.
+    /// Follows the JMAP push stream, calling `on_change` with the changed
+    /// types (`None`: any may have changed). Returns `Ok` when the stream
+    /// ends, at the latest after 30 minutes: reconnecting now and then
+    /// guards against silently dead streams. With `catch_up`, `on_change`
+    /// gets `None` once the stream is open, for what changed while there
+    /// was none.
     pub async fn watch_changes(
         &self,
+        catch_up: bool,
         mut on_change: impl FnMut(Option<Vec<String>>),
     ) -> anyhow::Result<()> {
-        /// Reconnecting now and then guards against silently dead streams.
         const STREAM_LIFETIME: Duration = Duration::from_secs(30 * 60);
+        let deadline = tokio::time::Instant::now() + STREAM_LIFETIME;
         let url = self
             .session
             .event_source_url
@@ -965,12 +1099,20 @@ impl JmapClient {
         let mut response = forwarded_for(self.http.get(url), self.client_ip)
             .credentials(&self.creds)
             .header(reqwest::header::ACCEPT, "text/event-stream")
-            .timeout(STREAM_LIFETIME)
             .send()
             .await?
             .error_for_status()?;
+        if catch_up {
+            on_change(None);
+        }
         let mut buffer = String::new();
-        while let Some(chunk) = response.chunk().await? {
+        loop {
+            let Ok(chunk) = tokio::time::timeout_at(deadline, response.chunk()).await else {
+                return Ok(());
+            };
+            let Some(chunk) = chunk? else {
+                break;
+            };
             buffer.push_str(&String::from_utf8_lossy(&chunk).replace('\r', ""));
             for types in take_state_events(&mut buffer) {
                 on_change(types);

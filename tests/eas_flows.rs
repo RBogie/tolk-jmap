@@ -2980,6 +2980,151 @@ async fn bodies_are_not_read_before_the_login_is_checked() {
     refused(too_big, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
+/// A command slot is taken before the body is read: while one request is
+/// still sending its body, another gets 503 when only one may run.
+#[tokio::test]
+async fn bodies_are_read_within_the_command_limit() {
+    let h = Harness::start_tuned(tolk::config::Tuning {
+        max_commands: 1,
+        ..Default::default()
+    })
+    .await;
+    let http = tolk::http_client().build().unwrap();
+    let url = |device: &str| {
+        format!(
+            "{}/Microsoft-Server-ActiveSync?Cmd=Sync&User=x&DeviceId={device}&DeviceType=T",
+            h.url
+        )
+    };
+    // A body that starts but does not finish.
+    let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(1);
+    sender.send(Ok(vec![0x03, 0x01])).await.unwrap();
+    let stream = futures_util::stream::unfold(receiver, |mut r| async move {
+        r.recv().await.map(|item| (item, r))
+    });
+    let slow = http
+        .post(url("slow"))
+        .basic_auth(support::fake_jmap::USER, Some(support::fake_jmap::PASSWORD))
+        .header("MS-ASProtocolVersion", "14.1")
+        .body(reqwest::Body::wrap_stream(stream))
+        .send();
+    let slow = tokio::spawn(slow);
+    // Until the slow request holds the slot.
+    let mut status = StatusCode::OK;
+    for _ in 0..50 {
+        let response = http
+            .post(url("other"))
+            .basic_auth(support::fake_jmap::USER, Some(support::fake_jmap::PASSWORD))
+            .header("MS-ASProtocolVersion", "14.1")
+            .send()
+            .await
+            .unwrap();
+        status = response.status();
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            assert_eq!(response.headers()["retry-after"], "30");
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    drop(sender);
+    let _ = slow.await;
+}
+
+/// Each Fetch may hold a download open until the response is streamed, so
+/// one request answers at most 50; the rest get status 3.
+#[tokio::test]
+async fn item_operations_caps_the_fetches_per_request() {
+    use tolk::wbxml::cp::{airsyncbase as base, item_operations as io};
+    let h = Harness::start().await;
+    h.jmap.change(|m| {
+        m.blobs.insert(
+            "small".to_owned(),
+            (b"hello".to_vec(), "text/plain".to_owned()),
+        )
+    });
+    let (device, _) = h.ready_device("d1").await;
+    let request = (0..52).fold(Element::new(io::ItemOperations), |request, _| {
+        request.child(
+            Element::new(io::Fetch)
+                .child(text(io::Store, "Mailbox"))
+                .child(text(base::FileReference, "small|text/plain")),
+        )
+    });
+    let reply = device.send("ItemOperations", Some(request)).await;
+    assert!(reply.status.is_success());
+    let statuses: Vec<String> = reply
+        .root()
+        .find(io::Response)
+        .unwrap()
+        .find_all(io::Fetch)
+        .map(|f| f.child_text(io::Status).unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(statuses.len(), 52);
+    assert!(statuses[..50].iter().all(|s| s == "1"), "{statuses:?}");
+    assert_eq!(statuses[50..], ["3", "3"]);
+}
+
+/// RFC 8620 5.5: a message deleted while a large folder is paged through
+/// shifts the later pages; paging starts over instead of skipping one.
+#[tokio::test]
+async fn a_message_deleted_while_paging_does_not_hide_another() {
+    let h = Harness::start().await;
+    h.jmap.change(|m| {
+        for i in 0..1005 {
+            support::fake_jmap::email_into(m, "inbox", &format!("Message {i}"), "Hi");
+        }
+        m.destroy_after_first_page = Some("Email".to_owned());
+    });
+    let (device, folders) = h.ready_device("d1").await;
+    let inbox = folders.id("Inbox");
+    let initial = device.initial_sync(&inbox).await;
+    let ids: std::collections::HashSet<String> = initial.add_ids().into_iter().collect();
+    assert_eq!(ids.len(), 1004, "every message that is still there");
+    h.jmap.read(|m| assert_eq!(m.all("Email").len(), 1004));
+}
+
+/// More objects than the server's maxObjectsInGet or maxObjectsInSet go in
+/// several calls instead of failing on every retry.
+#[tokio::test]
+async fn calls_stay_within_the_server_limits() {
+    let h = Harness::start().await;
+    h.jmap.change(|m| m.max_objects = Some(5));
+    let ids: Vec<String> = (0..12)
+        .map(|i| h.jmap.add_email("inbox", &format!("Message {i}"), "Hi"))
+        .collect();
+    let (device, folders) = h.ready_device("d1").await;
+    let inbox = folders.id("Inbox");
+    let initial = device.initial_sync(&inbox).await;
+    assert_eq!(initial.adds.len(), 12);
+    // Twelve read flags in one Sync.
+    let commands = initial.add_ids().into_iter().fold(
+        Element::new(airsync::Commands),
+        |commands, server_id| {
+            commands.child(
+                Element::new(airsync::Change)
+                    .child(text(airsync::ServerId, server_id))
+                    .child(
+                        Element::new(airsync::ApplicationData)
+                            .child(text(tolk::wbxml::cp::email::Read, "1")),
+                    ),
+            )
+        },
+    );
+    let result = device.sync(&inbox, &initial.key, Some(commands)).await;
+    assert_eq!(result.status, "1");
+    assert!(result.responses.is_empty(), "{:?}", result.responses);
+    h.jmap.read(|m| {
+        for id in &ids {
+            assert_eq!(
+                m.get("Email", id).unwrap()["keywords"]["$seen"],
+                true,
+                "{id}"
+            );
+        }
+    });
+}
+
 /// `tolk devices ...` on the harness's state database.
 fn devices_cli(h: &Harness, args: &[&str]) -> String {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_tolk"))

@@ -90,11 +90,11 @@ pub async fn handle(req: &Request<'_>, jmap: &JmapClient, push: &PushHub) -> Com
             "ping loop, delaying the answer"
         );
         // The device's next request or a shutdown ends the delay early.
-        let mut next_request = push.device_requests(req.user, req.device_id);
+        let mut next_request = req.next_request.clone();
         let mut shutdown = push.shutdown_signal();
         tokio::select! {
             _ = tokio::time::sleep(STORM_DELAY) => {}
-            _ = next_request.changed() => {}
+            _ = next_request.arrived() => {}
             _ = shutdown.changed() => {}
         }
     }
@@ -153,7 +153,7 @@ async fn respond(req: &Request<'_>, jmap: &JmapClient, push: &PushHub) -> Comman
     // Subscribe before the first check so no change slips in between.
     let account = push.account(jmap);
     let mut changes = account.subscribe();
-    let mut next_request = push.device_requests(req.user, req.device_id);
+    let mut next_request = req.next_request.clone();
     let mut shutdown = push.shutdown_signal();
     let deadline = Instant::now() + Duration::from_secs(params.heartbeat);
     let mut seen = *changes.borrow_and_update();
@@ -213,7 +213,7 @@ async fn respond(req: &Request<'_>, jmap: &JmapClient, push: &PushHub) -> Comman
                 }
             }
             // The device sent another request: this Ping is superseded.
-            _ = next_request.changed() => return Ok(reply(status::NO_CHANGES)),
+            _ = next_request.arrived() => return Ok(reply(status::NO_CHANGES)),
             _ = shutdown.changed() => return Ok(reply(status::NO_CHANGES)),
             _ = tokio::time::sleep(remaining.min(poll)) => {
                 if last_full.elapsed() + poll / 2 >= FALLBACK_POLL {

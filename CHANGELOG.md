@@ -36,6 +36,22 @@
     was shown it, keeps the whole description.
 - Meetings the user organizes under an alias: the user is no longer added
   as an attendee of their own meeting, and their existing entry is kept.
+- A large folder paged through while a message in it is deleted or moved
+  no longer leaves another message out (the first sync would miss it, a
+  resync could delete it from the device): paging starts over when the
+  JMAP server's `queryState` changes (RFC 8620 5.5).
+- Calls that would exceed the JMAP server's `maxObjectsInGet` or
+  `maxObjectsInSet` (a Sync window above 500, or more than 500 changes in
+  one Sync) are split instead of failing on every retry.
+- Request bodies are read within `MAX_COMMANDS` (busy: 503 before the
+  upload is taken in) and must arrive within 5 minutes (else 408).
+- A request that arrives while the device's hanging Sync or Ping is still
+  starting ends it, instead of waiting for it for up to an hour.
+- The push stream's planned renewal every 30 minutes is no longer logged as
+  "push stream failed", and changes made while the stream reconnects are
+  caught up.
+- ItemOperations answers at most 50 Fetches per request; the rest get
+  status 3.
 - Time zones that change for good during a year, as Alberta, British
   Columbia, Manitoba and Cuba do in 2026 by keeping daylight time, reach the
   device with the offset they have from then on. EAS describes a zone as

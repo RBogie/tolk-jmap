@@ -364,7 +364,7 @@ pub async fn handle(
     // Subscribe before the first pass so no change slips in between.
     let account = push.account(jmap);
     let mut changes = account.subscribe();
-    let mut next_request = push.device_requests(req.user, req.device_id);
+    let mut next_request = req.next_request.clone();
     let mut shutdown = push.shutdown_signal();
     let deadline = tokio::time::Instant::now() + wait;
     // Push does not cover shared accounts (see `SHARED_POLL_SECS`).
@@ -390,7 +390,7 @@ pub async fn handle(
                 }
             }
             // The device sent another request, or we are stopping.
-            _ = next_request.changed() => return Ok(None),
+            _ = next_request.arrived() => return Ok(None),
             _ = shutdown.changed() => return Ok(None),
             _ = tokio::time::sleep(remaining.min(poll)) => {}
         }

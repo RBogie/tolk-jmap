@@ -113,6 +113,35 @@ impl AccountPush {
     }
 }
 
+/// Tells a request when its device sent another one.
+#[derive(Clone, Debug)]
+pub struct NextRequest {
+    receiver: watch::Receiver<u64>,
+    /// This request's number among the device's requests.
+    arrival: u64,
+    /// Keeps a detached one waiting forever.
+    _sender: Option<std::sync::Arc<watch::Sender<u64>>>,
+}
+
+impl NextRequest {
+    /// Resolves once the device has sent a request after this one (at
+    /// once if it already has).
+    pub async fn arrived(&mut self) {
+        let arrival = self.arrival;
+        let _ = self.receiver.wait_for(|n| *n != arrival).await;
+    }
+
+    /// One that never resolves, for requests outside the device's flow.
+    pub fn detached() -> Self {
+        let (sender, receiver) = watch::channel(0);
+        Self {
+            receiver,
+            arrival: 0,
+            _sender: Some(std::sync::Arc::new(sender)),
+        }
+    }
+}
+
 impl Drop for AccountPush {
     fn drop(&mut self) {
         self.task.abort();
@@ -120,22 +149,22 @@ impl Drop for AccountPush {
 }
 
 impl PushHub {
-    /// Ends the device's pending Ping, if any.
-    pub fn interrupt_device(&self, user: &str, device_id: &str) {
+    /// A new request from the device: ends its waiting Ping or Sync, if
+    /// any, and returns what tells this request when the next one arrives.
+    /// Numbering and subscribing happen under one lock, so a request that
+    /// arrives before this one starts waiting still ends the wait.
+    pub fn arrive(&self, user: &str, device_id: &str) -> NextRequest {
         let mut devices = self.devices.locked();
         devices.retain(|_, sender| sender.receiver_count() > 0);
-        if let Some(sender) = devices.get(&format!("{user}/{device_id}")) {
-            sender.send_modify(|n| *n = n.wrapping_add(1));
-        }
-    }
-
-    /// Changes whenever the device sends another request.
-    pub fn device_requests(&self, user: &str, device_id: &str) -> watch::Receiver<u64> {
-        self.devices
-            .locked()
+        let sender = devices
             .entry(format!("{user}/{device_id}"))
-            .or_insert_with(|| watch::channel(0).0)
-            .subscribe()
+            .or_insert_with(|| watch::channel(0).0);
+        sender.send_modify(|n| *n = n.wrapping_add(1));
+        NextRequest {
+            arrival: *sender.borrow(),
+            receiver: sender.subscribe(),
+            _sender: None,
+        }
     }
 
     /// Tells every waiting Ping to answer now (the server is stopping).
@@ -185,9 +214,12 @@ impl PushHub {
 }
 
 async fn listen(jmap: JmapClient, changes: watch::Sender<Changes>) {
+    // Changes while no stream was open are not reported: after the first
+    // connection, every new one starts with a catch-up.
+    let mut catch_up = false;
     loop {
         let result = jmap
-            .watch_changes(|types| {
+            .watch_changes(catch_up, |types| {
                 let mut next = *changes.borrow();
                 next.record(types.as_deref());
                 // Types nobody syncs (e.g. Identity) wake no one.
@@ -198,6 +230,7 @@ async fn listen(jmap: JmapClient, changes: watch::Sender<Changes>) {
                 });
             })
             .await;
+        catch_up = true;
         if let Err(e) = result {
             if crate::jmap::is_unauthorized(&e) {
                 // Retrying an old password every few seconds would get the
@@ -213,8 +246,11 @@ async fn listen(jmap: JmapClient, changes: watch::Sender<Changes>) {
                 error = format!("{e:#}"),
                 "push stream failed"
             );
+            tokio::time::sleep(RECONNECT_DELAY).await;
+        } else {
+            // A planned end (or the server closing the stream).
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        tokio::time::sleep(RECONNECT_DELAY).await;
     }
 }
 
@@ -222,18 +258,28 @@ async fn listen(jmap: JmapClient, changes: watch::Sender<Changes>) {
 mod tests {
     use super::*;
 
+    async fn resolves(next: &mut NextRequest) -> bool {
+        tokio::time::timeout(Duration::from_millis(20), next.arrived())
+            .await
+            .is_ok()
+    }
+
     #[tokio::test]
-    async fn interrupts_only_the_same_device() {
+    async fn a_later_request_of_the_same_device_ends_a_wait() {
         let hub = PushHub::default();
-        let mut d1 = hub.device_requests("rob", "d1");
-        let mut d2 = hub.device_requests("rob", "d2");
-        hub.interrupt_device("rob", "d1");
-        assert!(d1.has_changed().unwrap());
-        assert!(!d2.has_changed().unwrap());
-        d1.mark_unchanged();
+        let mut d1 = hub.arrive("rob", "d1");
+        let mut d2 = hub.arrive("rob", "d2");
+        assert!(!resolves(&mut d1).await);
+        // Before d1 starts waiting, as when a request arrives while a
+        // hanging Sync is still being set up: the wait still ends.
+        let mut later = hub.arrive("rob", "d1");
+        assert!(resolves(&mut d1).await);
+        assert!(resolves(&mut d1.clone()).await, "a clone too");
+        assert!(!resolves(&mut d2).await, "only the same device");
+        assert!(!resolves(&mut later).await);
+        assert!(!resolves(&mut NextRequest::detached()).await);
         hub.shut_down();
         assert!(*hub.shutdown_signal().borrow());
-        let _ = d2.borrow_and_update();
     }
 
     #[test]

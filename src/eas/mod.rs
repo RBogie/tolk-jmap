@@ -83,6 +83,9 @@ pub struct Request<'a> {
     pub caps: crate::config::Caps,
     /// Attachments streamed into the response (see [`stream`]).
     pub downloads: stream::Downloads,
+    /// Resolves when the device sends its next request, which ends a
+    /// waiting Ping or Sync.
+    pub next_request: crate::push::NextRequest,
 }
 
 impl Request<'_> {
@@ -147,6 +150,7 @@ impl<'a> Request<'a> {
             persist_views: true,
             caps: Default::default(),
             downloads: Default::default(),
+            next_request: crate::push::NextRequest::detached(),
         }
     }
 }
@@ -389,16 +393,45 @@ async fn respond(
     }
 
     let cmd = query.cmd.as_deref().unwrap_or("?");
-    let limit = limits::body_limit(cmd, state.max_request_bytes);
-    let Ok(body) = axum::body::to_bytes(body, limit).await else {
-        tracing::warn!(user = %creds.username, cmd, limit, "request body too large");
-        return refuse(EasResponse::status(StatusCode::PAYLOAD_TOO_LARGE));
+    // Reading the body counts as command work, and has a deadline: many
+    // large or slow uploads must not be buffered beyond the command limit.
+    let Ok(permit) = state.concurrency.commands.try_acquire() else {
+        return refuse(busy(creds, cmd));
     };
-    let response = run(state, query, headers, creds, &jmap, cmd, &body).await;
+    let limit = limits::body_limit(cmd, state.max_request_bytes);
+    let body = match tokio::time::timeout(
+        limits::BODY_TIME_LIMIT,
+        axum::body::to_bytes(body, limit),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => {
+            tracing::warn!(user = %creds.username, cmd, limit, "request body too large");
+            return refuse(EasResponse::status(StatusCode::PAYLOAD_TOO_LARGE));
+        }
+        Err(_) => {
+            tracing::warn!(user = %creds.username, cmd, "request body not received in time");
+            return refuse(EasResponse::status(StatusCode::REQUEST_TIMEOUT));
+        }
+    };
+    let response = run(state, query, headers, creds, &jmap, cmd, &body, permit).await;
     (response, body)
 }
 
-/// Runs an authenticated command within the concurrency and time limits.
+/// 503 with Retry-After: too many requests are running.
+fn busy(creds: &Credentials, cmd: &str) -> EasResponse {
+    tracing::warn!(user = %creds.username, cmd, "too many requests at once");
+    let mut response = EasResponse::status(StatusCode::SERVICE_UNAVAILABLE);
+    response
+        .headers
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("30"));
+    response
+}
+
+/// Runs an authenticated command within the concurrency and time limits;
+/// `permit` is the command slot its body was read in.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     state: &AppState,
     query: &query::EasQuery,
@@ -407,21 +440,11 @@ async fn run(
     jmap: &JmapClient,
     cmd: &str,
     body: &[u8],
+    mut permit: tokio::sync::SemaphorePermit<'_>,
 ) -> EasResponse {
-    let busy = || {
-        tracing::warn!(user = %creds.username, cmd, "too many requests at once");
-        let mut response = EasResponse::status(StatusCode::SERVICE_UNAVAILABLE);
-        response
-            .headers
-            .insert(header::RETRY_AFTER, HeaderValue::from_static("30"));
-        response
-    };
-    // Decoding counts as command work; a request that turns out to wait for
-    // changes then moves to a long-poll slot, so waiting requests cannot use
-    // up the slots everything else needs.
-    let Ok(mut permit) = state.concurrency.commands.try_acquire() else {
-        return busy();
-    };
+    // Decoding counts as command work too; a request that turns out to wait
+    // for changes then moves to a long-poll slot, so waiting requests cannot
+    // use up the slots everything else needs.
     let body = match body {
         [] => None,
         bytes => match wbxml::decode(bytes) {
@@ -434,7 +457,7 @@ async fn run(
     };
     if limits::is_long_poll(cmd, body.as_ref()) {
         let Ok(long_poll) = state.concurrency.pings.try_acquire() else {
-            return busy();
+            return busy(creds, cmd);
         };
         permit = long_poll;
     }
@@ -575,9 +598,9 @@ async fn execute(
         state.store.adopt_login(&creds.username, user)?;
     }
 
-    // Any new request from a device ends its pending Ping (EAS semantics,
-    // and it stops two Pings of one device from waiting side by side).
-    state.push.interrupt_device(user, device_id);
+    // Any new request from a device ends its pending Ping or hanging Sync
+    // (EAS semantics, and it stops two of them from waiting side by side).
+    let next_request = state.push.arrive(user, device_id);
 
     // One command at a time per device, so sync state updates cannot
     // interleave. Ping is long-lived and only reads, so it does not wait.
@@ -668,6 +691,7 @@ async fn execute(
         persist_views: cmd != "Ping",
         caps: state.caps,
         downloads: Default::default(),
+        next_request,
     };
 
     let result = dispatch(state, query, jmap, cmd, &req).await;

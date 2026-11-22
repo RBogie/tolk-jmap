@@ -92,6 +92,13 @@ pub struct Model {
     pub ignore_ranges: bool,
     /// Every `Range` header downloads received.
     pub ranges: Vec<String>,
+    /// `maxObjectsInGet` and `maxObjectsInSet` (500 when unset); a call
+    /// above it gets `requestTooLarge`.
+    pub max_objects: Option<usize>,
+    /// For a query of this type that answers the first page of a longer
+    /// result, the page's first object is then destroyed, as when a message
+    /// is deleted while a client pages.
+    pub destroy_after_first_page: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -444,8 +451,11 @@ async fn session(State(shared): State<Shared>, headers: HeaderMap) -> Response {
         }))
         .into_response();
     }
+    let max = shared.model.lock().unwrap().max_objects.unwrap_or(500);
     let capabilities = json!({
-        "urn:ietf:params:jmap:core": { "maxObjectsInGet": 500, "maxSizeUpload": 50_000_000 },
+        "urn:ietf:params:jmap:core": {
+            "maxObjectsInGet": max, "maxObjectsInSet": max, "maxSizeUpload": 50_000_000,
+        },
         "urn:ietf:params:jmap:mail": {},
         "urn:ietf:params:jmap:submission": {},
         "urn:ietf:params:jmap:contacts": {},
@@ -622,11 +632,21 @@ async fn api(
             if method == "CalendarEvent/set" && args["sendSchedulingMessages"] == true {
                 model.scheduling.push(args.clone());
             }
+            let max = model.max_objects.unwrap_or(500);
+            let count = |key: &str| match &args[key] {
+                Value::Array(a) => a.len(),
+                Value::Object(o) => o.len(),
+                _ => 0,
+            };
+            let too_large = (method.ends_with("/get") && count("ids") > max)
+                || (method.ends_with("/set")
+                    && count("create") + count("update") + count("destroy") > max);
             let (name, result) = match model.method_faults.get_mut(&method) {
                 Some((error, remaining)) if *remaining > 0 => {
                     *remaining -= 1;
                     ("error".to_owned(), json!({ "type": error.clone() }))
                 }
+                _ if too_large => ("error".to_owned(), json!({ "type": "requestTooLarge" })),
                 _ if method == "Email/copy" => {
                     let (from, to) = if args["fromAccountId"] == SHARED_ACCOUNT {
                         (&mut *other, &mut *model)
@@ -729,7 +749,19 @@ fn dispatch(
             }))
         }
         (t, "get") if TYPES.contains(&t) => ok(get_objects(model, t, &args)),
-        (t, "query") if TYPES.contains(&t) => ok(query(model, t, &args)),
+        (t, "query") if TYPES.contains(&t) => {
+            let result = query(model, t, &args);
+            let partial = result["position"] == 0
+                && result["ids"].as_array().map_or(0, Vec::len)
+                    < result["total"].as_u64().unwrap_or(0) as usize;
+            if partial && model.destroy_after_first_page.as_deref() == Some(t) {
+                model.destroy_after_first_page = None;
+                if let Some(id) = result["ids"][0].as_str() {
+                    model.remove(t, id);
+                }
+            }
+            ok(result)
+        }
         (t, "changes") if TYPES.contains(&t) => match changes(model, t, &args) {
             Ok(result) => ok(result),
             Err(error) => ("error".to_owned(), json!({ "type": error })),
@@ -1117,7 +1149,7 @@ fn submission_set(
 }
 
 /// Stores a plain text message in `mailbox` of `m` and returns its id.
-fn email_into(m: &mut Model, mailbox: &str, subject: &str, body: &str) -> String {
+pub fn email_into(m: &mut Model, mailbox: &str, subject: &str, body: &str) -> String {
     let n = m.next_id + 1;
     let blob = format!("blob-msg-{n}");
     let raw = format!(

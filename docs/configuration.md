@@ -25,7 +25,7 @@ it at startup with an error naming the variable.
 | `MAX_REQUEST_MB` | `64` | Largest request body. Commands other than SendMail, SmartReply, SmartForward, Sync and ItemOperations are limited to 4 MiB regardless. |
 | `SHUTDOWN_DEADLINE_SECS` | `8` | How long in-flight requests may finish after SIGTERM. Keep it below the container's stop timeout (`stop_grace_period`, 10 s by default). |
 | `MAX_PINGS` | `1000` | Pings and waiting (hanging) Syncs at once; over it such a request gets 503 with Retry-After. |
-| `MAX_COMMANDS` | `256` | Other requests running at once. |
+| `MAX_COMMANDS` | `256` | Other requests running at once, counted from when the request body starts arriving. |
 | `LOGIN_FAILURES_PER_ADDRESS` | `10` | Failed logins from one address within 15 minutes before new logins from there are refused without asking the JMAP server. A password that worked before for that user still passes. |
 | `LOGIN_FAILURES_PER_USER` | `20` | The same for one user from any address. |
 | `METRICS_ADDR` | unset | Address for Prometheus metrics (`/metrics`), e.g. `0.0.0.0:9090`: requests per command and status with their time, failed logins, waiting Pings, running commands and state table sizes. Keep it off the public route. |
@@ -49,13 +49,15 @@ These are constants in the code:
 | Limit | Value | Where |
 |---|---|---|
 | Request elements | 100,000 per request, decoded text at most twice the request size plus 1 MiB; DeviceId and DeviceType up to 128 printable characters | `src/wbxml/decode.rs`, `src/limits.rs` |
+| Request body upload | 5 minutes, then 408 | `src/limits.rs` |
 | Command run time | 5 minutes; Ping and Sync their longest wait plus 5 minutes | `src/limits.rs` |
 | Ping heartbeat | 60 to 3540 s (as Exchange), up to 300 folders | `src/eas/ping.rs` |
 | Ping storm detection | 10 immediate answers in 60 s delay the next one by 30 s | `src/push.rs` |
 | Sync window | 100 by default, 512 at most | `src/eas/sync/mod.rs` |
 | Sync loop detection | the same SyncKey 3 times in a row, each within 30 min, sends the items of that response one at a time; one the device repeats 3 times too is quarantined | `src/eas/sync/mod.rs` |
 | Recipient lookup cache | 15 min | `src/jmap/people.rs` |
-| Push reconnect delay | 10 s | `src/push.rs` |
+| Push reconnect delay | 10 s after a failure; the stream is renewed every 30 min | `src/push.rs` |
+| Fetches per ItemOperations | 50; more get status 3 | `src/eas/item_operations.rs` |
 
 ## Device management
 
@@ -140,7 +142,8 @@ ContactCard, AddressBook, CalendarEvent and Calendar; changes the server
 reports for shared accounts count too (Stalwart reports none, so shared
 calendars and address books are rechecked every 2 minutes while a Ping or
 Sync waits). If the stream drops, Ping falls back to polling every 2
-minutes until it reconnects.
+minutes until it reconnects. After every reconnect, waiting Pings and Syncs
+check all their folders once, for what changed while there was no stream.
 
 ### Trust and network
 

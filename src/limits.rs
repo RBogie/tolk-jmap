@@ -189,6 +189,10 @@ pub fn is_long_poll(cmd: &str, body: Option<&crate::wbxml::Element>) -> bool {
     }
 }
 
+/// How long a device may take to send a request body: enough for the largest
+/// message at about 1 Mbit/s.
+pub const BODY_TIME_LIMIT: Duration = Duration::from_secs(300);
+
 /// How long a command may run. Ping and Sync may wait for changes up to
 /// the heartbeat limit.
 pub fn time_limit(cmd: &str) -> Duration {
