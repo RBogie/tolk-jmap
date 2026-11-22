@@ -2265,8 +2265,8 @@ async fn eas16_calendar_uses_locations_and_instance_ids() {
         Some("20261109T170000Z")
     );
     let server_id = initial.add_ids()[0].clone();
-    // A note on one occurrence, which EAS cannot show; the device syncs
-    // the change (otherwise its change below is a conflict).
+    // A note on one occurrence; the device syncs the change (otherwise its
+    // change below is a conflict).
     h.jmap.change(|m| {
         m.patch(
             "CalendarEvent",
@@ -2317,6 +2317,98 @@ async fn eas16_calendar_uses_locations_and_instance_ids() {
             "the series is untouched"
         );
     });
+}
+
+/// MS-ASCAL 2.2.2.21: one occurrence's description, reminder and busy
+/// status are stored (as Gmail sends a change, with every field), and shown
+/// in its `<Exception>` on a fresh sync. A sensitivity of its own has no
+/// place in JSCalendar and is refused.
+#[tokio::test]
+async fn eas16_one_occurrence_keeps_its_own_fields() {
+    use tolk::wbxml::cp::airsyncbase as base;
+    let h = Harness::start().await;
+    let id = h.jmap.change(weekly_meeting);
+    let (mut device, folders) = h.ready_device("d1").await;
+    device.version = "16.1".to_owned();
+    let calendar = folders.id("Calendar");
+    let initial = device.initial_sync(&calendar).await;
+    let server_id = initial.add_ids()[0].clone();
+    let change = |sensitivity: &str| {
+        Element::new(airsync::Commands).child(
+            Element::new(airsync::Change)
+                .child(text(airsync::ServerId, server_id.clone()))
+                .child(text(base::InstanceId, "20261116T170000Z"))
+                .child(
+                    Element::new(airsync::ApplicationData)
+                        .child(text(cal::AllDayEvent, "0"))
+                        .child(text(cal::StartTime, "20261116T170000Z"))
+                        .child(text(cal::EndTime, "20261116T180000Z"))
+                        .child(
+                            Element::new(base::Location).child(text(base::DisplayName, "Gym hall")),
+                        )
+                        .child(text(cal::Subject, "Gym"))
+                        .child(
+                            Element::new(base::Body)
+                                .child(text(base::Type, "1"))
+                                .child(text(base::Data, "Bring towels")),
+                        )
+                        .child(text(cal::Reminder, "45"))
+                        .child(Element::new(cal::Attendees))
+                        .child(text(cal::BusyStatus, "0"))
+                        .child(text(cal::MeetingStatus, "0"))
+                        .child(text(cal::Sensitivity, sensitivity)),
+                ),
+        )
+    };
+    let refused = device
+        .sync(&calendar, &initial.key, Some(change("2")))
+        .await;
+    assert_eq!(refused.status, "1");
+    assert_eq!(refused.responses.len(), 1, "{:?}", refused.responses);
+    assert_eq!(refused.responses[0].2, "6");
+    h.jmap.read(|m| {
+        let event = m.get("CalendarEvent", &id).unwrap();
+        assert!(
+            event["recurrenceOverrides"]
+                .get("2026-11-16T18:00:00")
+                .is_none()
+        );
+    });
+    let result = device
+        .sync(&calendar, &refused.key, Some(change("0")))
+        .await;
+    assert_eq!(result.status, "1");
+    assert!(result.responses.is_empty(), "{:?}", result.responses);
+    h.jmap.read(|m| {
+        let event = m.get("CalendarEvent", &id).unwrap();
+        let entry = &event["recurrenceOverrides"]["2026-11-16T18:00:00"];
+        assert_eq!(entry["description"], "Bring towels");
+        assert_eq!(entry["alerts"]["a1"]["trigger"]["offset"], "-PT45M");
+        assert_eq!(entry["freeBusyStatus"], "free");
+        assert!(entry.get("privacy").is_none(), "{entry}");
+        assert!(entry.get("participants").is_none(), "{entry}");
+        assert!(
+            event.get("description").is_none(),
+            "the series is untouched"
+        );
+    });
+
+    let fresh = device.initial_sync(&calendar).await;
+    let data = fresh.adds[0].find(airsync::ApplicationData).unwrap();
+    let exception = data
+        .find(cal::Exceptions)
+        .unwrap()
+        .find_all(cal::Exception)
+        .find(|e| e.child_text(base::InstanceId) == Some("20261116T170000Z"))
+        .unwrap();
+    assert_eq!(
+        exception
+            .find(base::Body)
+            .and_then(|b| b.child_text(base::Data)),
+        Some("Bring towels")
+    );
+    assert_eq!(exception.child_text(cal::Reminder), Some("45"));
+    assert_eq!(exception.child_text(cal::BusyStatus), Some("0"));
 }
 
 #[tokio::test]

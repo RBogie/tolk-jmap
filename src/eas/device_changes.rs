@@ -61,8 +61,14 @@ pub(super) trait Kind {
         None
     }
     /// The fields in the device's `ApplicationData` that have a value but no
-    /// place on the JMAP server (see `UNSUPPORTED_FIELDS`).
-    fn unsupported(&self, _data: &Element) -> Vec<&'static str> {
+    /// place on the JMAP server (see `UNSUPPORTED_FIELDS`). `id` is the
+    /// object a Change is for (`None` for an Add).
+    fn unsupported(
+        &self,
+        _id: Option<&str>,
+        _command: &Element,
+        _data: &Element,
+    ) -> Vec<&'static str> {
         Vec::new()
     }
     /// Whether the collection may be changed (a shared one may be read-only).
@@ -167,7 +173,7 @@ pub(super) async fn apply(
                     .push(add_status(&client_id, None, status::CONVERSION_ERROR));
                 continue;
             };
-            if refuse_unsupported(req, kind, data) {
+            if refuse_unsupported(req, kind, None, command, data) {
                 applied
                     .responses
                     .push(add_status(&client_id, None, status::CONVERSION_ERROR));
@@ -194,7 +200,7 @@ pub(super) async fn apply(
             || (command.tag == airsync::Delete && kind.is_patch(command));
         if is_change {
             if let Some(data) = command.find(airsync::ApplicationData)
-                && refuse_unsupported(req, kind, data)
+                && refuse_unsupported(req, kind, Some(&id), command, data)
             {
                 applied.responses.push(item_status(
                     command.tag,
@@ -315,8 +321,14 @@ pub(super) async fn apply(
 
 /// Logs the fields of `data` the server cannot store; whether the command
 /// is refused for them (`UNSUPPORTED_FIELDS=reject`).
-fn refuse_unsupported(req: &Request, kind: &impl Kind, data: &Element) -> bool {
-    let fields = kind.unsupported(data);
+fn refuse_unsupported(
+    req: &Request,
+    kind: &impl Kind,
+    id: Option<&str>,
+    command: &Element,
+    data: &Element,
+) -> bool {
+    let fields = kind.unsupported(id, command, data);
     if fields.is_empty() {
         return false;
     }

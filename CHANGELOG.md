@@ -11,6 +11,31 @@
 
 ### Fixed
 
+- Calendar recurrence:
+  - The nth day, weekday or weekend day of a month or year (for example
+    "last weekday") is stored as such (`bySetPosition`) instead of as an
+    occurrence on every day of the week, and reaches the device as such
+    instead of being left out.
+  - Patterns EAS cannot express are left out instead of sent as another
+    pattern: every Monday of a month (sent as a day of the month), a fifth
+    or second-to-last weekday (sent as the last), different weekdays with
+    different weeks, or several days of the month.
+- One occurrence of a series:
+  - Its description, reminder, busy status, categories and, for a meeting
+    the user organizes, attendees are stored when the device changes them
+    (with an InstanceId or in `<Exceptions>`), and sent to the device.
+    Before, only the title, location and times were.
+  - A field equal to the series is not stored for the occurrence, so a later
+    change to the series reaches it.
+  - A Sensitivity of its own has no place in JSCalendar: the change is
+    refused (status 6), or with `UNSUPPORTED_FIELDS=log` stored without it.
+  - Occurrences the JMAP server stores as paths into the series' values
+    (as Stalwart does) are shown with those values, and an edit replaces
+    such a path instead of writing both.
+  - An occurrence sent back with its description truncated, as the device
+    was shown it, keeps the whole description.
+- Meetings the user organizes under an alias: the user is no longer added
+  as an attendee of their own meeting, and their existing entry is kept.
 - Time zones that change for good during a year, as Alberta, British
   Columbia, Manitoba and Cuba do in 2026 by keeping daylight time, reach the
   device with the offset they have from then on. EAS describes a zone as
