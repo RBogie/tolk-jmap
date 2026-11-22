@@ -95,8 +95,9 @@ image was built by this repository's release workflow from the tagged
 source before running it:
 
 ```sh
-gh attestation verify oci://ghcr.io/rbogie/tolk-jmap:0.1.0 --repo RBogie/tolk-jmap
-gh attestation verify tolk-0.1.0-linux-amd64 --repo RBogie/tolk-jmap
+gh attestation verify oci://ghcr.io/rbogie/tolk-jmap:0.3.0 --repo RBogie/tolk-jmap
+gh attestation verify tolk-0.3.0-linux-amd64 --repo RBogie/tolk-jmap
+gh attestation verify tolk-0.3.0-windows-amd64.exe --repo RBogie/tolk-jmap
 ```
 
 To build it yourself: `docker build -t tolk .`, or
