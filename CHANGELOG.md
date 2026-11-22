@@ -19,6 +19,13 @@
 
 ### Fixed
 
+- Moving a series to another time on a device moves its occurrences with
+  it: an occurrence's key is its original start, so before, a moved or
+  changed occurrence was left under its old key, naming an occurrence that
+  no longer exists, and a new one without its own fields was added (#24).
+- A time change sent with the zone's rules but no names (as iOS sends it)
+  keeps the event's own zone name, for example Europe/Zurich, instead of
+  the most common zone with the same rules.
 - Calendar recurrence:
   - The nth day, weekday or weekend day of a month or year (for example
     "last weekday") is stored as such (`bySetPosition`) instead of as an

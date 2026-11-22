@@ -1070,6 +1070,7 @@ pub fn change_from_eas(
         }
     }
     let mut event = from_eas(&merged);
+    keep_zone_name(&mut event, current);
     let series = event.clone();
     // What the device was shown, read the same way: a field that reads the
     // same was not changed on the device.
@@ -1101,8 +1102,42 @@ pub fn change_from_eas(
         patch.insert("recurrenceOverrides".to_owned(), Value::Null);
         return patch;
     }
-    // The occurrences the device sent, each merged into what it was. A patch
-    // path needs an existing object, so a first one writes them whole.
+    // An occurrence's key is its original start, so when the series start
+    // moves, the occurrences the event has move with it (10:00 to 10:30
+    // makes `2026-12-08T10:00:00` `2026-12-08T10:30:00`): they stay
+    // attached to their occurrence instead of naming one that no longer
+    // exists.
+    let shift = patch.get("start").and_then(|start| {
+        let new = tz::parse_local(start.as_str()?)?;
+        let old = tz::parse_local(current["start"].as_str()?)?;
+        Some(new.duration_since(old)).filter(|d| !d.is_zero())
+    });
+    let rekey = |key: &str| -> String {
+        shift
+            .and_then(|by| tz::parse_local(key)?.checked_add(by).ok())
+            .map_or_else(|| key.to_owned(), local_string)
+    };
+    let rekeyed = |overrides: Option<&Value>| -> Option<Map<String, Value>> {
+        let overrides = overrides?.as_object()?;
+        Some(
+            overrides
+                .iter()
+                .map(|(key, entry)| (rekey(key), entry.clone()))
+                .collect(),
+        )
+    };
+    let old_overrides = rekeyed(current.get("recurrenceOverrides"));
+    // A device may still name an occurrence by its start before the move: a
+    // key the event had that no longer names one is read as moved too.
+    let device_key = |key: String| -> String {
+        let before = current["recurrenceOverrides"].as_object();
+        let stale = shift.is_some()
+            && before.is_some_and(|b| b.contains_key(&key))
+            && old_overrides.as_ref().is_none_or(|o| !o.contains_key(&key));
+        if stale { rekey(&key) } else { key }
+    };
+    let mut written: Option<Map<String, Value>> = old_overrides.clone().filter(|_| shift.is_some());
+    // The occurrences the device sent, each merged into what it was.
     if let Some(Value::Object(overrides)) = event.remove("recurrenceOverrides")
         && sent(cal::Exceptions)
     {
@@ -1118,15 +1153,22 @@ pub fn change_from_eas(
                     .into_iter()
                     .next()?
                     .0;
-                Some((key, exception))
+                Some((device_key(key), exception))
             })
             .collect();
         // What the device sent back of an occurrence as it was shown stays as
         // it is (a truncated description, say), and so does an occurrence
         // sent back whole.
-        let shown_overrides = shown_event.get("recurrenceOverrides").cloned();
+        let shown_overrides = rekeyed(shown_event.get("recurrenceOverrides"));
+        let old_of = |key: &str| {
+            old_overrides
+                .as_ref()
+                .and_then(|o| o.get(key))
+                .unwrap_or(&Value::Null)
+        };
         let overrides: Map<String, Value> = overrides
             .into_iter()
+            .map(|(key, entry)| (device_key(key), entry))
             .filter_map(|(key, entry)| {
                 let shown = shown_overrides.as_ref().and_then(|o| o.get(&key));
                 let entry = match (entry, shown) {
@@ -1143,7 +1185,7 @@ pub fn change_from_eas(
             })
             .map(|(key, mut entry)| {
                 if let Value::Object(fields) = &mut entry {
-                    let old = &current["recurrenceOverrides"][&key];
+                    let old = old_of(&key);
                     inherit(fields, &series, old);
                     if let Some(exception) = sent_exceptions.get(&key) {
                         occurrence_attendees(fields, exception, own_email, current, old);
@@ -1153,24 +1195,62 @@ pub fn change_from_eas(
             })
             .filter(|(_, entry)| entry.as_object().is_none_or(|e| !e.is_empty()))
             .collect();
-        if overrides.is_empty() {
-            return patch;
-        }
-        if !current["recurrenceOverrides"].is_object() {
-            patch.insert("recurrenceOverrides".to_owned(), Value::Object(overrides));
-            return patch;
-        }
         for (key, entry) in overrides {
-            let entry = match (&current["recurrenceOverrides"][&key], entry) {
+            let entry = match (old_of(&key), entry) {
                 (Value::Object(old), Value::Object(new)) if new.get("excluded").is_none() => {
                     Value::Object(merge_override(old, new))
                 }
                 (_, entry) => entry,
             };
-            patch.insert(format!("recurrenceOverrides/{key}"), entry);
+            match &mut written {
+                Some(all) => {
+                    all.insert(key, entry);
+                }
+                // A patch path needs an existing object, so a first one
+                // writes them whole.
+                None if old_overrides.is_none() => {
+                    written = Some(Map::from_iter([(key, entry)]));
+                }
+                None => {
+                    patch.insert(format!("recurrenceOverrides/{key}"), entry);
+                }
+            }
         }
     }
+    if let Some(all) = written {
+        patch.insert("recurrenceOverrides".to_owned(), Value::Object(all));
+    }
     patch
+}
+
+/// Keeps the event's own time zone name when the device's zone has the same
+/// rules: devices send the zone as rules, and iOS without names, so it would
+/// otherwise become the most common zone with those rules (Europe/Zurich
+/// turning into Europe/Amsterdam).
+fn keep_zone_name(event: &mut Map<String, Value>, current: &Value) {
+    let new = event.get("timeZone").and_then(Value::as_str);
+    let (Some(new), Some(own)) = (new, current["timeZone"].as_str()) else {
+        return;
+    };
+    if new == own {
+        return;
+    }
+    let (Some(new_zone), Some(own_zone)) = (tz::zone_named(new), tz::zone_named(own)) else {
+        return;
+    };
+    let year = event_year(
+        event
+            .get("start")
+            .and_then(Value::as_str)
+            .and_then(tz::parse_local),
+    );
+    if tz::same_zone(
+        &tz::eas_timezone(Some(&new_zone), year),
+        &tz::eas_timezone(Some(&own_zone), year),
+    ) {
+        let own = own.to_owned();
+        event.insert("timeZone".to_owned(), own.into());
+    }
 }
 
 /// Whether two `ApplicationData` have the same start, end, all-day flag and
@@ -2555,6 +2635,118 @@ mod tests {
         let participants = entry["participants"].as_object().unwrap();
         assert_eq!(participants.len(), 3, "{entry}");
         assert_eq!(participants["a"]["participationStatus"], "accepted");
+    }
+
+    /// The case from #24: the series moved half an hour later on the phone,
+    /// which sends its occurrences under their new original starts.
+    #[test]
+    fn moving_the_series_moves_its_occurrences() {
+        let event = series();
+        let exception = |original: &str, fields: &[(Tag, &str)]| {
+            fields.iter().fold(
+                Element::new(cal::Exception)
+                    .child(Element::with_text(cal::ExceptionStartTime, original)),
+                |e, (tag, value)| e.child(Element::with_text(*tag, *value)),
+            )
+        };
+        let data = device(&event, |d| {
+            set(d, cal::StartTime, "20261118T163000Z");
+            set(d, cal::EndTime, "20261118T173000Z");
+            without(d, &[cal::Exceptions]);
+            d.push(
+                Element::new(cal::Exceptions)
+                    .child(exception(
+                        "20261125T163000Z",
+                        &[
+                            (cal::Subject, "Review (moved)"),
+                            (cal::StartTime, "20261125T170000Z"),
+                            (cal::EndTime, "20261125T180000Z"),
+                        ],
+                    ))
+                    .child(exception("20261202T163000Z", &[(cal::Deleted, "1")])),
+            );
+        });
+        for version in [141, 161] {
+            let patch = change_from_eas(&event, &data, version, None, "rob@example.com", &plain());
+            assert_eq!(patch["start"], "2026-11-18T17:30:00");
+            let overrides = patch["recurrenceOverrides"].as_object().unwrap();
+            let keys: Vec<&String> = overrides.keys().collect();
+            assert_eq!(
+                keys,
+                ["2026-11-25T17:30:00", "2026-12-02T17:30:00"],
+                "{patch:?}"
+            );
+            let moved = &overrides["2026-11-25T17:30:00"];
+            assert_eq!(moved["start"], "2026-11-25T18:00:00");
+            assert_eq!(moved["description"], "Other room", "its own fields stay");
+            assert_eq!(overrides["2026-12-02T17:30:00"]["excluded"], true);
+            assert!(
+                !patch.keys().any(|k| k.starts_with("recurrenceOverrides/")),
+                "{patch:?}"
+            );
+        }
+        // A device that still names the occurrences by their old starts.
+        let stale = device(&event, |d| {
+            set(d, cal::StartTime, "20261118T163000Z");
+            set(d, cal::EndTime, "20261118T173000Z");
+        });
+        let patch = change_from_eas(&event, &stale, 141, None, "rob@example.com", &plain());
+        let overrides = patch["recurrenceOverrides"].as_object().unwrap();
+        let keys: Vec<&String> = overrides.keys().collect();
+        assert_eq!(
+            keys,
+            ["2026-11-25T17:30:00", "2026-12-02T17:30:00"],
+            "{patch:?}"
+        );
+        assert_eq!(
+            overrides["2026-11-25T17:30:00"]["description"],
+            "Other room"
+        );
+        // EAS 16 with `<Exceptions>` left out: the occurrences move too.
+        let mut data = data.clone();
+        without(&mut data, &[cal::Exceptions]);
+        let patch = change_from_eas(&event, &data, 161, None, "rob@example.com", &plain());
+        let overrides = patch["recurrenceOverrides"].as_object().unwrap();
+        assert_eq!(overrides["2026-11-25T17:30:00"]["title"], "Review (moved)");
+        assert_eq!(overrides.len(), 2);
+        // Only the end moving keeps the keys.
+        let data = device(&event, |d| set(d, cal::EndTime, "20261118T173000Z"));
+        let patch = change_from_eas(&event, &data, 161, None, "rob@example.com", &plain());
+        assert!(!patch.contains_key("recurrenceOverrides"), "{patch:?}");
+    }
+
+    /// A time change sent with the zone's rules but no names (as iOS sends
+    /// it) keeps the event's own zone name; another zone is taken.
+    #[test]
+    fn a_time_change_keeps_the_zone_name() {
+        use base64::Engine;
+        let mut event = series();
+        event["timeZone"] = json!("Europe/Zurich");
+        let nameless = |zone: &str| {
+            let blob = tz::eas_timezone(tz::zone_named(zone).as_ref(), 2026);
+            let mut bytes = base64::engine::general_purpose::STANDARD
+                .decode(blob)
+                .unwrap();
+            bytes[4..68].fill(0);
+            bytes[88..152].fill(0);
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        };
+        let data = device(&event, |d| {
+            set(d, cal::StartTime, "20261118T163000Z");
+            set(d, cal::EndTime, "20261118T173000Z");
+            set(d, cal::TimeZone, &nameless("Europe/Zurich"));
+        });
+        let patch = change_from_eas(&event, &data, 161, None, "rob@example.com", &plain());
+        assert_eq!(patch["start"], "2026-11-18T17:30:00");
+        assert_eq!(patch["timeZone"], "Europe/Zurich");
+        let data = device(&event, |d| {
+            set(d, cal::StartTime, "20261118T163000Z");
+            set(d, cal::EndTime, "20261118T173000Z");
+            set(d, cal::TimeZone, &nameless("Europe/London"));
+        });
+        let patch = change_from_eas(&event, &data, 161, None, "rob@example.com", &plain());
+        assert_eq!(patch["timeZone"], "Europe/London");
+        assert_eq!(patch["start"], "2026-11-18T16:30:00");
     }
 
     #[test]
