@@ -35,11 +35,25 @@ mod status {
     pub const INVALID_ATTACHMENT: &str = "15";
 }
 
+/// Fetches answered per request; each may hold a download from the JMAP
+/// server open until the response is streamed. Devices fetch one or a few.
+const MAX_FETCHES: usize = 50;
+
 pub async fn handle(req: &Request<'_>, jmap: &JmapClient) -> CommandResult {
     let body = req.body_with_root(io::ItemOperations)?;
     let mut response = Element::new(io::Response);
+    let mut fetches = 0;
     for operation in body.elements() {
+        if operation.tag == io::Fetch {
+            fetches += 1;
+        }
         let reply = match operation.tag {
+            io::Fetch if fetches > MAX_FETCHES => {
+                if fetches == MAX_FETCHES + 1 {
+                    tracing::warn!(limit = MAX_FETCHES, "too many fetches in one request");
+                }
+                fetch_status(status::SERVER_ERROR)
+            }
             io::Fetch => match fetch(req, jmap, operation).await {
                 Ok(reply) => reply,
                 Err(CommandError::Backend(e)) if !jmap::is_unauthorized(&e) => {

@@ -213,29 +213,32 @@ impl JmapClient {
         body_values: BodyValues,
         max_body_bytes: u32,
     ) -> anyhow::Result<Vec<Email>> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
+        let mut emails = Vec::with_capacity(ids.len());
+        // A sync window may be larger than the server's maxObjectsInGet.
+        for batch in ids.chunks(self.max_objects_in_get()) {
+            let mut args = self
+                .call(
+                    "Email/get",
+                    json!({
+                        "accountId": self.account_for(MAIL)?,
+                        "ids": batch,
+                        "properties": [
+                            "id", "blobId", "mailboxIds", "keywords", "size", "receivedAt", "subject",
+                            "from", "to", "cc", "replyTo", "htmlBody", "textBody",
+                            "attachments", "bodyValues", "messageId", "inReplyTo", "references",
+                            "threadId", "preview", "header:Importance:asText", "header:X-Priority:asText",
+                        ],
+                        "bodyProperties": ["partId", "blobId", "size", "name", "type", "cid", "disposition"],
+                        "fetchTextBodyValues": matches!(body_values, BodyValues::Text | BodyValues::Both),
+                        "fetchHTMLBodyValues": matches!(body_values, BodyValues::Html | BodyValues::Both),
+                        "maxBodyValueBytes": max_body_bytes,
+                    }),
+                )
+                .await?;
+            let list: Vec<Email> = serde_json::from_value(args["list"].take())?;
+            emails.extend(list);
         }
-        let mut args = self
-            .call(
-                "Email/get",
-                json!({
-                    "accountId": self.account_for(MAIL)?,
-                    "ids": ids,
-                    "properties": [
-                        "id", "blobId", "mailboxIds", "keywords", "size", "receivedAt", "subject",
-                        "from", "to", "cc", "replyTo", "htmlBody", "textBody",
-                        "attachments", "bodyValues", "messageId", "inReplyTo", "references",
-                        "threadId", "preview", "header:Importance:asText", "header:X-Priority:asText",
-                    ],
-                    "bodyProperties": ["partId", "blobId", "size", "name", "type", "cid", "disposition"],
-                    "fetchTextBodyValues": matches!(body_values, BodyValues::Text | BodyValues::Both),
-                    "fetchHTMLBodyValues": matches!(body_values, BodyValues::Html | BodyValues::Both),
-                    "maxBodyValueBytes": max_body_bytes,
-                }),
-            )
-            .await?;
-        Ok(serde_json::from_value(args["list"].take())?)
+        Ok(emails)
     }
 
     /// Stores a message that is about to be sent in Sent (Drafts without
