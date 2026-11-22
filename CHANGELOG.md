@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 (2026-11-22)
+
 ### Added
 
 - Windows: a native binary (`tolk-<version>-windows-amd64.exe`) in each
@@ -9,9 +11,20 @@
   Ctrl-Break, closing the console, logoff and shutdown, and trusts the
   Windows certificate store. operations.md says how to protect its data
   folder, since Windows does not get the Unix file modes.
+- `UNSUPPORTED_FIELDS` (`reject` or `log`): what happens to a device change
+  with a field the JMAP server has no place for (see Changed).
 
 ### Changed
 
+- A device Add or Change with a field the JMAP server cannot store is
+  refused (status 6) instead of stored without it, so nothing is lost
+  without the device knowing: contacts with CustomerId, GovernmentId or
+  AccountName (no JSContact property), and an occurrence with a
+  Sensitivity other than its series' (RFC 8984 allows no `privacy` in an
+  occurrence). With `UNSUPPORTED_FIELDS=log` the rest is stored and the
+  field names are logged.
+- Request bodies are read within `MAX_COMMANDS` (busy: 503 before the
+  upload is taken in) and must arrive within 5 minutes (else 408).
 - Dates and time zones are handled with jiff instead of chrono and
   chrono-tz, which RustSec lists as unmaintained (RUSTSEC-2026-0543 and
   RUSTSEC-2026-0555). The binary carries jiff's copy of the time zone
@@ -19,14 +32,20 @@
 
 ### Fixed
 
-- Moving a series to another time on a device moves its occurrences with
-  it: an occurrence's key is its original start, so before, a moved or
-  changed occurrence was left under its old key, naming an occurrence that
-  no longer exists, and a new one without its own fields was added (#24).
-- A time change sent with the zone's rules but no names (as iOS sends it)
-  keeps the event's own zone name, for example Europe/Zurich, instead of
-  the most common zone with the same rules.
-- Calendar recurrence:
+Calendar:
+
+- Editing an event on a device only writes what it changed. A field sent
+  back as the device was shown it stays as it is, so an edit on the phone
+  no longer turns several reminders or locations into one, `secret` into
+  `private`, a recurrence rule EAS cannot express (EAS 14) into a single
+  event, or the event's time zone into another name with the same rules.
+  A truncated description sent back unchanged is no longer cut either.
+- Fields the device leaves out (MS-ASCMD 2.2.3.24): a left-out description
+  (iOS leaves it out when only the time changes) or `<Exceptions>` stays as
+  it is, and so does a single occurrence left out of `<Exceptions>`. With
+  EAS 16, every left-out field stays; with EAS 14, `<Supported>` now also
+  applies to calendars.
+- Recurrence:
   - The nth day, weekday or weekend day of a month or year (for example
     "last weekday") is stored as such (`bySetPosition`) instead of as an
     occurrence on every day of the week, and reaches the device as such
@@ -41,84 +60,51 @@
     (with an InstanceId or in `<Exceptions>`), and sent to the device.
     Before, only the title, location and times were.
   - A field equal to the series is not stored for the occurrence, so a later
-    change to the series reaches it.
-  - A Sensitivity of its own has no place in JSCalendar: the change is
-    refused (status 6), or with `UNSUPPORTED_FIELDS=log` stored without it.
+    change to the series reaches it; what the device leaves out of an
+    occurrence stays as it was.
   - Occurrences the JMAP server stores as paths into the series' values
     (as Stalwart does) are shown with those values, and an edit replaces
     such a path instead of writing both.
   - An occurrence sent back with its description truncated, as the device
     was shown it, keeps the whole description.
-- Meetings the user organizes under an alias: the user is no longer added
-  as an attendee of their own meeting, and their existing entry is kept.
-- A large folder paged through while a message in it is deleted or moved
-  no longer leaves another message out (the first sync would miss it, a
-  resync could delete it from the device): paging starts over when the
-  JMAP server's `queryState` changes (RFC 8620 5.5).
-- Calls that would exceed the JMAP server's `maxObjectsInGet` or
-  `maxObjectsInSet` (a Sync window above 500, or more than 500 changes in
-  one Sync) are split instead of failing on every retry.
-- Request bodies are read within `MAX_COMMANDS` (busy: 503 before the
-  upload is taken in) and must arrive within 5 minutes (else 408).
-- A request that arrives while the device's hanging Sync or Ping is still
-  starting ends it, instead of waiting for it for up to an hour.
-- The push stream's planned renewal every 30 minutes is no longer logged as
-  "push stream failed", and changes made while the stream reconnects are
-  caught up.
-- ItemOperations answers at most 50 Fetches per request; the rest get
-  status 3.
-- Time zones that change for good during a year, as Alberta, British
-  Columbia, Manitoba and Cuba do in 2026 by keeping daylight time, reach the
-  device with the offset they have from then on. EAS describes a zone as
-  one offset or a yearly switch to daylight time and back, which cannot say
-  "once".
+- Moving a series to another time on a device moves its occurrences with
+  it: an occurrence's key is its original start, so before, a moved or
+  changed occurrence was left under its old key, naming an occurrence that
+  no longer exists, and a new one without its own fields was added (#24).
 - MeetingResponse:
   - With EAS 16, the organizer now gets a reply when the device asks for
     one (`SendResponse`): the JMAP server sends it. Before, no reply was
     sent.
   - Answering one occurrence of a series (InstanceId) only answers that
     occurrence instead of the whole series.
-- Contacts:
-  - Car, radio, assistant, company main and MMS phones, the assistant,
-    manager and children, the Yomi (phonetic) names and the office location
-    are kept instead of dropped. CustomerId, GovernmentId and AccountName
-    have no JSContact property: an Add or Change with one of them is now
-    refused (status 6) instead of stored without it, unless
-    `UNSUPPORTED_FIELDS=log` (store the rest and log the field names).
-  - Deleting a card that is in several address books only takes it out of
-    that folder's book.
-  - When the device moves an email or IM address to another slot, it keeps
-    its own entry (contexts, label).
-  - A name edit keeps how the full name is written where it can, and
-    otherwise follows the card's order and separators. An edited address
-    field keeps its place among the components.
-- A device reusing a ClientId in a later Sync gets a new object instead of
-  the one an earlier Add created (MS-ASCMD 2.2.3.28.2: a ClientId is only
-  unique within one Sync).
-- Conflicting changes (MS-ASCMD 2.2.3.34): a Change for a contact, event
-  or message (read and flag state) that the server changed since the device
-  last received it no longer overwrites the server's version. The device gets status 7 and the
-  server's version, unless it asked for `<Conflict>0</Conflict>`. A Delete
-  still wins.
-- Editing an event on a device only writes what it changed. A field sent
-  back as the device was shown it stays as it is, so an edit on the phone
-  no longer turns several reminders or locations into one, `secret` into
-  `private`, a recurrence rule EAS cannot express (EAS 14) into a single
-  event, or the event's time zone into another name with the same rules.
-  A truncated description sent back unchanged is no longer cut either.
 - Cancelled meetings reach the device as cancelled (MeetingStatus 5 or 7).
-- Attachment and message downloads to the device are no longer cut off
-  after 30 seconds on a slow connection: they only fail when the JMAP
-  server sends nothing for 90 seconds. Other JMAP calls keep their
-  30-second limit.
-- SmartReply and SmartForward with `ReplaceMime` (as iOS sends them) mark
-  the original as answered or forwarded.
-- ItemOperations Range fetches are streamed to the device like whole
-  attachments instead of read into memory first. Only when the JMAP server
-  gives no lengths is the part read first, and then at most 10 MiB (the
-  response's Range says what was sent). A Range ending at the largest
-  number no longer makes the request fail.
-- docs: compatibility.md no longer says remote wipe is not offered.
+- Meetings the user organizes under an alias: the user is no longer added
+  as an attendee of their own meeting, and their existing entry is kept.
+- A time change sent with the zone's rules but no names (as iOS sends it)
+  keeps the event's own zone name, for example Europe/Zurich, instead of
+  the most common zone with the same rules.
+- Time zones that change for good during a year, as Alberta, British
+  Columbia, Manitoba and Cuba do in 2026 by keeping daylight time, reach the
+  device with the offset they have from then on. EAS describes a zone as
+  one offset or a yearly switch to daylight time and back, which cannot say
+  "once".
+
+Contacts:
+
+- Car, radio, assistant, company main and MMS phones, the assistant,
+  manager and children, the Yomi (phonetic) names and the office location
+  are kept instead of dropped.
+- Deleting a card that is in several address books only takes it out of
+  that folder's book.
+- When the device moves an email or IM address to another slot, it keeps
+  its own entry (contexts, label).
+- A name edit keeps how the full name is written where it can, and
+  otherwise follows the card's order and separators. An edited address
+  field keeps its place among the components.
+- A left-out body no longer deletes the notes.
+
+Mail and sending:
+
 - Failed sends:
   - A message the JMAP server refuses no longer leaves a copy in Sent.
   - When the server's answer to a send is lost, the device is told to try
@@ -129,19 +115,51 @@
     draft send that already went out is not sent again.
   - A refusal for missing or invalid recipients gets its own status
     (SendMail 119 or 116, a draft send 183) instead of a general failure.
+- SmartReply and SmartForward with `ReplaceMime` (as iOS sends them) mark
+  the original as answered or forwarded.
+- Drafts (EAS 16): a left-out To, Cc or Subject is removed instead of kept,
+  and an edited reply keeps its `In-Reply-To` and `References`.
+- Attachment and message downloads to the device are no longer cut off
+  after 30 seconds on a slow connection: they only fail when the JMAP
+  server sends nothing for 90 seconds. Other JMAP calls keep their
+  30-second limit.
+- ItemOperations Range fetches are streamed to the device like whole
+  attachments instead of read into memory first. Only when the JMAP server
+  gives no lengths is the part read first, and then at most 10 MiB (the
+  response's Range says what was sent). A Range ending at the largest
+  number no longer makes the request fail.
+- ItemOperations answers at most 50 Fetches per request; the rest get
+  status 3.
+
+Sync, push and limits:
+
+- Conflicting changes (MS-ASCMD 2.2.3.34): a Change for a contact, event or
+  message (read and flag state) that the server changed since the device
+  last received it no longer overwrites the server's version. The device
+  gets status 7 and the server's version, unless it asked for
+  `<Conflict>0</Conflict>`. A Delete still wins.
+- A device reusing a ClientId in a later Sync gets a new object instead of
+  the one an earlier Add created (MS-ASCMD 2.2.3.28.2: a ClientId is only
+  unique within one Sync).
+- A large folder paged through while a message in it is deleted or moved
+  no longer leaves another message out (the first sync would miss it, a
+  resync could delete it from the device): paging starts over when the
+  JMAP server's `queryState` changes (RFC 8620 5.5).
+- Calls that would exceed the JMAP server's `maxObjectsInGet` or
+  `maxObjectsInSet` (a Sync window above 500, or more than 500 changes in
+  one Sync) are split instead of failing on every retry.
+- A request that arrives while the device's hanging Sync or Ping is still
+  starting ends it, instead of waiting for it for up to an hour.
+- The push stream's planned renewal every 30 minutes is no longer logged as
+  "push stream failed", and changes made while the stream reconnects are
+  caught up.
 - The warning for a login without a JMAP mail account no longer blames
   OAuth when the login was a password (for example an app password limited
   to IMAP and SMTP).
-- Device changes follow MS-ASCMD on fields the device leaves out:
-  - Calendar: a left-out description (iOS leaves it out when only the time
-    changes) or `<Exceptions>` stays as it is, and so does a single
-    occurrence left out of `<Exceptions>`. With EAS 16, every left-out field
-    stays; with EAS 14, `<Supported>` now also applies to calendars.
-    Occurrences keep what EAS cannot show, also when one is changed by
-    InstanceId.
-  - Contacts: a left-out body no longer deletes the notes.
-  - Drafts (EAS 16): a left-out To, Cc or Subject is removed instead of
-    kept, and an edited reply keeps its `In-Reply-To` and `References`.
+
+Docs:
+
+- compatibility.md no longer says remote wipe is not offered.
 
 ## 0.2.0 (2026-11-15)
 
