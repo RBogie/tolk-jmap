@@ -328,7 +328,12 @@ fn refuse_unsupported(
     command: &Element,
     data: &Element,
 ) -> bool {
-    let fields = kind.unsupported(id, command, data);
+    refuses(req, &kind.unsupported(id, command, data))
+}
+
+/// Logs `fields`, those of a device's change the server cannot store;
+/// whether the change is refused for them (`UNSUPPORTED_FIELDS=reject`).
+pub(super) fn refuses(req: &Request, fields: &[&str]) -> bool {
     if fields.is_empty() {
         return false;
     }

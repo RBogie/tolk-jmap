@@ -15,6 +15,7 @@ use jiff::{SignedDuration as Duration, Timestamp, civil::DateTime};
 use serde_json::{Map, Value, json};
 
 use super::{
+    device_body,
     email::{self, BodyPreference, body_type},
     tz::{self, Tz, local_in},
 };
@@ -90,8 +91,8 @@ pub fn to_eas(event: &Value, body: &BodyPreference, own_email: &str) -> Element 
         cal::AllDayEvent,
         if timing.all_day { "1" } else { "0" },
     ));
-    if let Some(description) = event["description"].as_str().filter(|d| !d.is_empty()) {
-        data.push(body_element(description, body));
+    if let Some(element) = description_body(event, body) {
+        data.push(element);
     }
     data.push(Element::with_text(
         cal::BusyStatus,
@@ -247,10 +248,28 @@ fn attendees_element(attendees: &[&&Value]) -> Element {
         })
 }
 
-fn body_element(text: &str, pref: &BodyPreference) -> Element {
-    let (kind, mut data) = match pref.body_type {
-        body_type::HTML => (body_type::HTML, email::text_to_html(text)),
-        _ => (body_type::PLAIN, text.to_owned()),
+/// The `description` of an event or occurrence as a `<Body>` of the type
+/// the device asked for, if it has one.
+fn description_body(event: &Value, pref: &BodyPreference) -> Option<Element> {
+    let description = event["description"].as_str().filter(|d| !d.is_empty())?;
+    Some(body_element(description, is_html(event), pref))
+}
+
+/// Whether the event's or occurrence's `description` is HTML
+/// (`descriptionContentType`, RFC 8984 4.2.3).
+fn is_html(event: &Value) -> bool {
+    event["descriptionContentType"]
+        .as_str()
+        .and_then(|t| t.split(';').next())
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("text/html"))
+}
+
+fn body_element(description: &str, html: bool, pref: &BodyPreference) -> Element {
+    let (kind, mut data) = match (pref.body_type, html) {
+        (body_type::HTML, true) => (body_type::HTML, description.to_owned()),
+        (body_type::HTML, false) => (body_type::HTML, email::text_to_html(description)),
+        (_, true) => (body_type::PLAIN, email::html_to_text(description)),
+        (_, false) => (body_type::PLAIN, description.to_owned()),
     };
     let size = data.len();
     let mut truncated = false;
@@ -555,11 +574,10 @@ fn exceptions(
             {
                 exception.push(Element::with_text(cal::Location, location));
             }
-            if differs("description")
-                && let Some(description) =
-                    occurrence["description"].as_str().filter(|d| !d.is_empty())
+            if (differs("description") || is_html(&occurrence) != is_html(event))
+                && let Some(element) = description_body(&occurrence, body)
             {
-                exception.push(body_element(description, body));
+                exception.push(element);
             }
             if differs("alerts")
                 && let Some(minutes) = reminder_minutes(&occurrence)
@@ -807,6 +825,7 @@ pub fn own_participant_key<'a>(event: &'a Value, own_email: &str) -> Option<&'a 
 pub const MANAGED: &[&str] = &[
     "title",
     "description",
+    "descriptionContentType",
     "locations",
     "start",
     "duration",
@@ -938,12 +957,11 @@ pub fn from_eas(data: &Element) -> Map<String, Value> {
             }
         }
     }
-    if let Some(description) = data
-        .find(airsyncbase::Body)
-        .and_then(|b| b.child_text(airsyncbase::Data))
-        .filter(|d| !d.trim().is_empty())
-    {
+    if let Some((description, content_type)) = description_from_eas(data) {
         event.insert("description".to_owned(), description.into());
+        if content_type == HTML_TYPE {
+            event.insert("descriptionContentType".to_owned(), content_type.into());
+        }
     }
     if let Some(location) = text(cal::Location) {
         event.insert(
@@ -1012,6 +1030,7 @@ fn keywords_from_eas(categories: &Element) -> Value {
 const SOURCES: &[(&str, &[Tag])] = &[
     ("title", &[cal::Subject]),
     ("description", &[airsyncbase::Body]),
+    ("descriptionContentType", &[airsyncbase::Body]),
     ("locations", &[cal::Location]),
     ("start", TIMING),
     ("duration", TIMING),
@@ -1079,6 +1098,11 @@ pub fn change_from_eas(
     let timing_unchanged = same_timing(&merged, &shown);
     let unchanged = |key: &str| match key {
         "start" | "duration" | "timeZone" | "showWithoutTime" => timing_unchanged,
+        // A new description is written with its type.
+        "descriptionContentType" => {
+            event.get(key) == shown_event.get(key)
+                && event.get("description") == shown_event.get("description")
+        }
         _ => event.get(key) == shown_event.get(key),
     };
     let changed: Vec<&str> = SOURCES
@@ -1173,7 +1197,14 @@ pub fn change_from_eas(
                 let shown = shown_overrides.as_ref().and_then(|o| o.get(&key));
                 let entry = match (entry, shown) {
                     (Value::Object(mut entry), Some(Value::Object(shown))) => {
+                        let content_type = entry.get(DESCRIPTION_TYPE).cloned();
                         entry.retain(|k, v| shown.get(k) != Some(v));
+                        // A new description is written with its type.
+                        if entry.contains_key("description")
+                            && let Some(content_type) = content_type
+                        {
+                            entry.insert(DESCRIPTION_TYPE.to_owned(), content_type);
+                        }
                         if entry.is_empty() {
                             return None;
                         }
@@ -1451,6 +1482,18 @@ fn inherit(entry: &mut Map<String, Value>, series: &Map<String, Value>, old: &Va
             entry.remove(*key);
         }
     }
+    // The description's type is kept only with a description, and only
+    // where it is not the series' (unless the occurrence had its own).
+    fn content_type(v: Option<&Value>) -> &str {
+        v.and_then(Value::as_str).unwrap_or("text/plain")
+    }
+    let own_before = old.get(DESCRIPTION_TYPE).is_some();
+    if !entry.contains_key("description")
+        || (content_type(entry.get(DESCRIPTION_TYPE)) == content_type(series.get(DESCRIPTION_TYPE))
+            && !own_before)
+    {
+        entry.remove(DESCRIPTION_TYPE);
+    }
 }
 
 /// The attendees of one occurrence of a meeting the user organizes, when the
@@ -1486,6 +1529,38 @@ pub fn occurrence_key(event: &Value, instance_id: &str) -> Option<String> {
     Some(local_string(key))
 }
 
+const DESCRIPTION_TYPE: &str = "descriptionContentType";
+const HTML_TYPE: &str = "text/html";
+
+/// The body types a description can be: plain text, HTML kept as
+/// `text/html` (RFC 8984 4.2.3), or a message, read for its HTML or text.
+pub const BODY_TYPES: &[u8] = &[device_body::PLAIN, device_body::HTML, device_body::MIME];
+
+/// The description in a device's `ApplicationData` or `<Exception>`, with
+/// its content type; `None` for an empty body or one of a type it cannot be
+/// (see [`BODY_TYPES`]).
+fn description_from_eas(parent: &Element) -> Option<(String, &'static str)> {
+    let body = device_body::of(parent).filter(|b| !b.is_empty())?;
+    let (description, html) = body.text_or_html(BODY_TYPES)?;
+    Some((description, if html { HTML_TYPE } else { "text/plain" }))
+}
+
+/// The body types the device sent that a description cannot be, in the
+/// event and its exceptions, and messages with files it has no place for.
+pub fn unsupported_bodies(data: &Element) -> Vec<&'static str> {
+    let exceptions = data
+        .find(cal::Exceptions)
+        .into_iter()
+        .flat_map(|list| list.find_all(cal::Exception));
+    std::iter::once(data)
+        .chain(exceptions)
+        .filter_map(|parent| {
+            device_body::unsupported(parent, BODY_TYPES)
+                .or_else(|| device_body::unsupported_files(parent))
+        })
+        .collect()
+}
+
 /// EAS `<Exceptions>` as JSCalendar `recurrenceOverrides`.
 fn overrides_from_eas(exceptions: &Element, tz: Option<&Tz>, all_day: bool) -> Map<String, Value> {
     let mut overrides = Map::new();
@@ -1514,13 +1589,11 @@ fn overrides_from_eas(exceptions: &Element, tz: Option<&Tz>, all_day: bool) -> M
                 );
             }
             // An empty body is no change: devices send one for an
-            // occurrence whose description they did not load.
-            if let Some(description) = exception
-                .find(airsyncbase::Body)
-                .and_then(|b| b.child_text(airsyncbase::Data))
-                .filter(|d| !d.trim().is_empty())
-            {
+            // occurrence whose description they did not load. The type is
+            // written too, so it does not stay the series'.
+            if let Some((description, content_type)) = description_from_eas(exception) {
                 patch.insert("description".to_owned(), description.into());
+                patch.insert(DESCRIPTION_TYPE.to_owned(), content_type.into());
             }
             if let Some(reminder) = exception.find(cal::Reminder) {
                 patch.insert("alerts".to_owned(), alerts_from_eas(reminder.text()));
@@ -2405,7 +2478,11 @@ mod tests {
         let moved = Element::with_text(airsyncbase::Data, "Bring the numbers");
         let data = occurrence_change(|d| {
             without(d, &[airsyncbase::Body]);
-            d.push(Element::new(airsyncbase::Body).child(moved));
+            d.push(
+                Element::new(airsyncbase::Body)
+                    .child(Element::with_text(airsyncbase::Type, "1"))
+                    .child(moved),
+            );
         });
         let (key, entry) =
             occurrence_override(&event, "20261125T160000Z", Some(&data), "rob@example.com")
@@ -2934,5 +3011,184 @@ mod tests {
         let patch = change_from_eas(&event, &data, 141, None, "rob@example.com", &plain());
         assert_eq!(patch["recurrenceRule"], Value::Null);
         assert_eq!(patch["recurrenceOverrides"], Value::Null);
+    }
+
+    fn body(body_type: &str, content: &str) -> Element {
+        Element::new(airsyncbase::Body)
+            .child(Element::with_text(airsyncbase::Type, body_type))
+            .child(Element::with_text(airsyncbase::Data, content))
+    }
+
+    #[test]
+    fn an_html_description_stays_html() {
+        let event = json!({
+            "uid": "u1", "title": "Plan", "start": "2026-11-18T17:00:00",
+            "timeZone": "Europe/Amsterdam", "duration": "PT1H",
+            "description": "<p>Bring <b>slides</b></p>",
+            "descriptionContentType": "text/html",
+        });
+        let own = "rob@example.com";
+        // A device that reads HTML gets it as it is; one that reads text
+        // gets it as text.
+        let html = BodyPreference {
+            body_type: body_type::HTML,
+            ..plain()
+        };
+        let shown = to_eas(&event, &html, own);
+        let shown_body = shown.find(airsyncbase::Body).unwrap();
+        assert_eq!(shown_body.child_text(airsyncbase::Type), Some("2"));
+        assert_eq!(
+            shown_body.child_text(airsyncbase::Data),
+            Some("<p>Bring <b>slides</b></p>")
+        );
+        let mut data = to_eas(&event, &plain(), own);
+        let text_body = data.find(airsyncbase::Body).unwrap();
+        assert_eq!(text_body.child_text(airsyncbase::Type), Some("1"));
+        assert_eq!(
+            text_body.child_text(airsyncbase::Data).map(str::trim),
+            Some("Bring slides")
+        );
+        // Sent back as shown, by either: the HTML stays.
+        for (data, pref) in [(&shown, &html), (&data, &plain())] {
+            let patch = change_from_eas(&event, data, 160, None, own, pref);
+            assert!(patch.is_empty(), "{patch:?}");
+        }
+        // A new text is written as text.
+        without(&mut data, &[airsyncbase::Body]);
+        data.push(body("1", "Bring the numbers"));
+        let patch = change_from_eas(&event, &data, 160, None, own, &plain());
+        assert_eq!(patch["description"], "Bring the numbers");
+        assert_eq!(patch["descriptionContentType"], Value::Null);
+        // HTML from the device is written as HTML.
+        without(&mut data, &[airsyncbase::Body]);
+        data.push(body("2", "<p>Bring <i>numbers</i></p>"));
+        let patch = change_from_eas(&event, &data, 160, None, own, &plain());
+        assert_eq!(patch["description"], "<p>Bring <i>numbers</i></p>");
+        assert_eq!(patch["descriptionContentType"], "text/html");
+    }
+
+    #[test]
+    fn an_occurrence_keeps_the_type_of_its_description() {
+        let event = series();
+        let data = occurrence_change(|d| {
+            without(d, &[airsyncbase::Body]);
+            d.push(body("2", "<p>Other <b>room</b></p>"));
+        });
+        let (_, entry) =
+            occurrence_override(&event, "20261118T160000Z", Some(&data), "rob@example.com")
+                .unwrap();
+        assert_eq!(entry["description"], "<p>Other <b>room</b></p>");
+        assert_eq!(entry["descriptionContentType"], "text/html");
+        // Text like the series' needs no type of its own.
+        let data = occurrence_change(|d| {
+            without(d, &[airsyncbase::Body]);
+            d.push(body("1", "Other room"));
+        });
+        let (_, entry) =
+            occurrence_override(&event, "20261118T160000Z", Some(&data), "rob@example.com")
+                .unwrap();
+        assert_eq!(entry["description"], "Other room");
+        assert!(entry.get("descriptionContentType").is_none(), "{entry}");
+        // An HTML occurrence is shown as HTML to a device that reads it.
+        let mut event = series();
+        event["recurrenceOverrides"]["2026-11-25T17:00:00"]["description"] =
+            "<p>Other <b>room</b></p>".into();
+        event["recurrenceOverrides"]["2026-11-25T17:00:00"]["descriptionContentType"] =
+            "text/html".into();
+        let html = BodyPreference {
+            body_type: body_type::HTML,
+            ..plain()
+        };
+        let data = to_eas(&event, &html, "rob@example.com");
+        let exception = data
+            .find(cal::Exceptions)
+            .unwrap()
+            .find_all(cal::Exception)
+            .find(|e| e.find(airsyncbase::Body).is_some())
+            .unwrap();
+        assert_eq!(
+            exception
+                .find(airsyncbase::Body)
+                .and_then(|b| b.child_text(airsyncbase::Data)),
+            Some("<p>Other <b>room</b></p>")
+        );
+    }
+
+    #[test]
+    fn bodies_a_description_cannot_be_are_reported_not_read() {
+        let mut data = to_eas(&series(), &plain(), "rob@example.com");
+        without(&mut data, &[airsyncbase::Body]);
+        data.push(body("3", "e1xydGYxfQ=="));
+        assert_eq!(unsupported_bodies(&data), ["Body of type 3 (RTF)"]);
+        assert_eq!(from_eas(&data)["description"], Value::Null);
+        // In an exception too.
+        let mut data = to_eas(&series(), &plain(), "rob@example.com");
+        without(&mut data, &[cal::Exceptions]);
+        data.push(
+            Element::new(cal::Exceptions).child(
+                Element::new(cal::Exception)
+                    .child(Element::with_text(
+                        cal::ExceptionStartTime,
+                        "20261209T160000Z",
+                    ))
+                    .child(body("0", "hi")),
+            ),
+        );
+        assert_eq!(unsupported_bodies(&data), ["Body of an unknown type"]);
+    }
+
+    #[test]
+    fn a_mime_body_gives_its_html_or_text() {
+        let alternative = "Content-Type: multipart/alternative; boundary=b\r\n\
+            \r\n\
+            --b\r\n\
+            Content-Type: text/plain\r\n\
+            \r\n\
+            Bring slides\r\n\
+            --b\r\n\
+            Content-Type: text/html\r\n\
+            \r\n\
+            <p>Bring <b>slides</b></p>\r\n\
+            --b--\r\n";
+        let mut data = to_eas(&series(), &plain(), "rob@example.com");
+        without(&mut data, &[airsyncbase::Body, cal::Exceptions]);
+        data.push(body("4", alternative));
+        assert!(unsupported_bodies(&data).is_empty());
+        let event = from_eas(&data);
+        assert_eq!(
+            event["description"].as_str().map(str::trim),
+            Some("<p>Bring <b>slides</b></p>")
+        );
+        assert_eq!(event["descriptionContentType"], "text/html");
+        without(&mut data, &[airsyncbase::Body]);
+        data.push(body(
+            "4",
+            "Content-Type: text/plain\r\n\r\nBring slides\r\n",
+        ));
+        let event = from_eas(&data);
+        assert_eq!(
+            event["description"].as_str().map(str::trim),
+            Some("Bring slides")
+        );
+        assert_eq!(event["descriptionContentType"], Value::Null);
+        // A description has no place for files.
+        let with_file = "Content-Type: multipart/mixed; boundary=b\r\n\
+            \r\n\
+            --b\r\n\
+            Content-Type: text/plain\r\n\
+            \r\n\
+            See the plan\r\n\
+            --b\r\n\
+            Content-Type: application/pdf; name=plan.pdf\r\n\
+            Content-Disposition: attachment; filename=plan.pdf\r\n\
+            \r\n\
+            %PDF-\r\n\
+            --b--\r\n";
+        without(&mut data, &[airsyncbase::Body]);
+        data.push(body("4", with_file));
+        assert_eq!(
+            unsupported_bodies(&data),
+            ["Body of type 4 (MIME) with attachments"]
+        );
     }
 }

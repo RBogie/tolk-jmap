@@ -25,6 +25,22 @@ pub const UNSUPPORTED: [(Tag, &str); 3] = [
     (c2::AccountName, "AccountName"),
 ];
 
+/// The body types a contact's notes can come in: plain text, or HTML or a
+/// message read as text (RFC 9553 notes are plain text).
+pub const BODY_TYPES: &[u8] = &[
+    super::device_body::PLAIN,
+    super::device_body::HTML,
+    super::device_body::MIME,
+];
+
+/// The notes in a device's `ApplicationData`; `None` for an empty body or
+/// one of another type (see [`BODY_TYPES`]).
+pub fn note_from_eas(data: &Element) -> Option<String> {
+    super::device_body::of(data)?
+        .text(BODY_TYPES)
+        .filter(|n| !n.trim().is_empty())
+}
+
 /// Card properties this mapping writes.
 pub const MANAGED: &[&str] = &[
     "name",
@@ -714,11 +730,7 @@ pub fn from_eas(data: &Element) -> Map<String, Value> {
             json!({ "m1": { "kind": "photo", "mediaType": "image/jpeg", "uri": format!("data:image/jpeg;base64,{photo}") } }),
         );
     }
-    if let Some(note) = data
-        .find(airsyncbase::Body)
-        .and_then(|b| b.child_text(airsyncbase::Data))
-        .filter(|n| !n.trim().is_empty())
-    {
+    if let Some(note) = note_from_eas(data) {
         card.insert("notes".to_owned(), json!({ "n1": { "note": note } }));
     }
     card
