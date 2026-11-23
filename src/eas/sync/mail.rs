@@ -145,6 +145,14 @@ impl ClientCommands<'_> {
                             ));
                             continue;
                         }
+                        if device_changes::refuses(self.req, &drafts::unsupported(data)) {
+                            responses.push(item_status(
+                                command.tag,
+                                server_id,
+                                status::CONVERSION_ERROR,
+                            ));
+                            continue;
+                        }
                         match self.edit_draft(&email_id, data, snapshot).await {
                             Ok(None) => {}
                             Ok(Some(attachments)) => responses.push(
@@ -323,6 +331,13 @@ impl ClientCommands<'_> {
                 client_id,
                 None,
                 status::SERVER_ERROR,
+            ));
+        }
+        if device_changes::refuses(self.req, &drafts::unsupported(data)) {
+            return Ok(device_changes::add_status(
+                client_id,
+                None,
+                status::CONVERSION_ERROR,
             ));
         }
         let saved = match drafts::create(self.req, self.jmap, self.folder, data).await {

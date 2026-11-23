@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Fixed
+
+- A draft whose body the device sends as a whole MIME message (Type 4, as
+  iOS Mail does) is stored with that message's text, HTML and files,
+  instead of the raw MIME as its text. Its To, Cc, Bcc, Subject and reply
+  headers fill in for the fields the device does not send; From is still
+  the account's (#52).
+- Bodies the device sends are read by their type (MS-ASAIRS 2.2.2.22.1)
+  instead of all as plain text, and `Data` sent as opaque bytes is read
+  too:
+  - Calendar: an HTML description (type 2) is stored as HTML
+    (`descriptionContentType: text/html`), for the event and for one
+    occurrence; a MIME one (type 4) as its HTML part, or else its text. An HTML description, also one made elsewhere, is sent as
+    HTML to a device that asks for HTML and as text to one that asks for
+    text, instead of as markup or escaped HTML.
+  - Contacts: an HTML or MIME note is stored as its text (JSContact notes
+    are plain text).
+  - Drafts: plain text, HTML and MIME, as before and above.
+  - A body that cannot be stored (RTF, a body without a type, or for an
+    event or contact a MIME message with attachments) is refused with status 6, or with
+    `UNSUPPORTED_FIELDS=log` left out (the earlier body stays), instead of
+    being stored as its encoded text.
+
 ## 0.3.0 (2026-11-22)
 
 ### Added

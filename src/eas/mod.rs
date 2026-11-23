@@ -3,6 +3,7 @@
 pub mod calendar;
 pub mod compose;
 pub mod contacts;
+mod device_body;
 mod device_changes;
 pub mod drafts;
 pub mod email;

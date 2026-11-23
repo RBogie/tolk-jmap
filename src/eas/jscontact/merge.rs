@@ -902,17 +902,16 @@ fn keywords(ctx: &Ctx, patch: &mut Map<String, Value>) {
 /// The body shows every note; a changed one replaces them. A Change
 /// without a body leaves them as they are (MS-ASCMD 2.2.3.24).
 fn notes(ctx: &Ctx, patch: &mut Map<String, Value>) {
-    let Some(body) = ctx.data.find(airsyncbase::Body) else {
+    if ctx.data.find(airsyncbase::Body).is_none() {
         return;
-    };
-    let body = Some(body);
-    let text = |body: Option<&Element>| {
-        body.and_then(|b| b.child_text(airsyncbase::Data))
-            .filter(|n| !n.trim().is_empty())
-            .map(str::to_owned)
-    };
-    let device = text(body);
-    let shown = text(ctx.shown.find(airsyncbase::Body));
+    }
+    // A body of a type notes cannot be is refused before this (see
+    // `UNSUPPORTED_FIELDS`), or else left out.
+    if super::super::device_body::unsupported(ctx.data, super::BODY_TYPES).is_some() {
+        return;
+    }
+    let device = super::note_from_eas(ctx.data);
+    let shown = super::note_from_eas(&ctx.shown);
     if device.as_deref().map(str::trim) == shown.as_deref().map(str::trim) {
         return;
     }

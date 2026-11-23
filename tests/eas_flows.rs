@@ -4529,3 +4529,105 @@ async fn shared_folder_polls_leave_the_users_own_folders_alone() {
     assert!(count(&calls, "Email/changes") <= 2, "{calls:?}");
     assert!(count(&calls, "CalendarEvent/changes") >= 4, "{calls:?}");
 }
+
+#[tokio::test]
+async fn bodies_of_types_that_cannot_be_stored_are_refused_or_left_out() {
+    use tolk::wbxml::cp::airsyncbase as base;
+    let body = |body_type: &str, data: &str| {
+        Element::new(base::Body)
+            .child(text(base::Type, body_type))
+            .child(text(base::Data, data))
+    };
+    let add = |client_id: &str, data: Element| {
+        Element::new(airsync::Commands).child(
+            Element::new(airsync::Add)
+                .child(text(airsync::ClientId, client_id))
+                .child(data),
+        )
+    };
+    let event = |b: Element| {
+        Element::new(airsync::ApplicationData)
+            .child(text(cal::Subject, "Planning"))
+            .child(text(cal::StartTime, "20261104T090000Z"))
+            .child(text(cal::EndTime, "20261104T100000Z"))
+            .child(b)
+    };
+    let card = |b: Element| {
+        Element::new(airsync::ApplicationData)
+            .child(text(ct::FirstName, "Grace"))
+            .child(b)
+    };
+    let draft = |b: Element| {
+        Element::new(airsync::ApplicationData)
+            .child(text(em::Subject, "Plans"))
+            .child(b)
+    };
+    let rtf = || body("3", "e1xydGYxIEhpfQ==");
+
+    // Default: an RTF body is refused with status 6, nothing stored.
+    let h = Harness::start().await;
+    let (mut device, folders) = h.ready_device("d1").await;
+    device.version = "16.1".to_owned();
+    for (folder, data) in [
+        ("Calendar", event(rtf())),
+        ("Contacts", card(rtf())),
+        ("Drafts", draft(rtf())),
+    ] {
+        let id = folders.id(folder);
+        let initial = device.initial_sync(&id).await;
+        let refused = device.sync(&id, &initial.key, Some(add("1", data))).await;
+        assert_eq!(refused.responses[0].2, "6", "{folder}");
+    }
+    h.jmap.read(|m| {
+        assert!(m.all("CalendarEvent").is_empty());
+        assert!(m.all("ContactCard").is_empty());
+        assert!(m.all("Email").iter().all(|e| e["subject"] != "Plans"));
+    });
+
+    // HTML is stored as HTML in a description, as text in notes.
+    let calendar = folders.id("Calendar");
+    let initial = device.initial_sync(&calendar).await;
+    let html = event(body("2", "<p>Bring <b>slides</b></p>"));
+    let added = device
+        .sync(&calendar, &initial.key, Some(add("2", html)))
+        .await;
+    assert_eq!(added.responses[0].2, "1");
+    let contacts = folders.id("Contacts");
+    let initial = device.initial_sync(&contacts).await;
+    let html = card(body("2", "<p>Met at <b>FOSDEM</b></p>"));
+    let added = device
+        .sync(&contacts, &initial.key, Some(add("2", html)))
+        .await;
+    assert_eq!(added.responses[0].2, "1");
+    h.jmap.read(|m| {
+        let event = &m.all("CalendarEvent")[0];
+        assert_eq!(event["description"], "<p>Bring <b>slides</b></p>");
+        assert_eq!(event["descriptionContentType"], "text/html");
+        let card = &m.all("ContactCard")[0];
+        let note = card["notes"]["n1"]["note"].as_str().unwrap();
+        assert_eq!(note.trim(), "Met at FOSDEM");
+    });
+
+    // UNSUPPORTED_FIELDS=log: stored without the body.
+    let mut tuning = tolk::config::Tuning::default();
+    tuning.caps.unsupported_fields = tolk::config::UnsupportedFields::Log;
+    let h = Harness::start_tuned(tuning).await;
+    let (mut device, folders) = h.ready_device("d1").await;
+    device.version = "16.1".to_owned();
+    for (folder, data) in [
+        ("Calendar", event(rtf())),
+        ("Contacts", card(rtf())),
+        ("Drafts", draft(rtf())),
+    ] {
+        let id = folders.id(folder);
+        let initial = device.initial_sync(&id).await;
+        let stored = device.sync(&id, &initial.key, Some(add("1", data))).await;
+        assert_eq!(stored.responses[0].2, "1", "{folder}");
+    }
+    h.jmap.read(|m| {
+        assert!(m.all("CalendarEvent")[0].get("description").is_none());
+        assert!(m.all("ContactCard")[0].get("notes").is_none());
+        let draft = m.all("Email").into_iter().find(|e| e["subject"] == "Plans");
+        assert!(draft.is_some());
+    });
+}

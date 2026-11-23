@@ -233,6 +233,8 @@ impl Kind for ContactChanges<'_> {
             .iter()
             .filter(|(tag, _)| data.child_text(*tag).is_some_and(|v| !v.trim().is_empty()))
             .map(|(_, name)| *name)
+            .chain(super::device_body::unsupported(data, jscontact::BODY_TYPES))
+            .chain(super::device_body::unsupported_files(data))
             .collect()
     }
 

@@ -353,11 +353,11 @@ impl Kind for CalendarChanges<'_> {
     ) -> Vec<&'static str> {
         let current = id.and_then(|id| self.current(id));
         let one_occurrence = instance_id(command).is_some();
+        let mut fields = jscalendar::unsupported_bodies(data);
         if jscalendar::occurrence_privacy(current, data, one_occurrence) {
-            vec!["Sensitivity of one occurrence"]
-        } else {
-            Vec::new()
+            fields.push("Sensitivity of one occurrence");
         }
+        fields
     }
 
     fn current_version(&self, id: &str) -> Option<u64> {
