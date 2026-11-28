@@ -27,7 +27,7 @@ mail-parser = "1.0.0"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
 # reqwest's TLS, with the ring provider (see `http_client`).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rusqlite = { version = "0.42.0", features = ["bundled"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 futures-util = "0.3"
 serde_json = "1"
